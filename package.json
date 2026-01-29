@@ -1,0 +1,22 @@
+{
+	"name": "koe",
+	"version": "0.0.1",
+	"type": "module",
+	"private": true,
+	"scripts": {
+		"init---------------------------------": "",
+		"prepare": "husky",
+		"check--------------------------------": "",
+		"util:format": "cargo fmt --all",
+		"util:lint": "cargo clippy --all-targets --all-features -- -D warnings",
+		"util:test": "cargo test --all",
+		"util:check": "STATUS=0; bun run util:format || STATUS=1; bun run util:lint || STATUS=1; bun run util:test || STATUS=1; exit $STATUS"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.3.11",
+		"@commitlint/cli": "^20.3.1",
+		"@commitlint/config-conventional": "^20.3.1",
+		"husky": "^9.1.7",
+		"lint-staged": "^16.2.7"
+	}
+}

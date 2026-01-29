@@ -1,0 +1,37 @@
+# Rust
+target/
+*.rs.bk
+
+# Node
+node_modules/
+bun.lock
+
+# Build
+dist/
+build/
+
+# OS
+.DS_Store
+._*
+
+# Editors
+.vscode/
+.zed/
+.idea/
+
+# Logs
+*.log
+
+# Temp
+.tmp/
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Hooks
+.husky/_/
+
+# Claude
+.claude/

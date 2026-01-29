@@ -1,0 +1,19 @@
+[package]
+name = "koe-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+screencapturekit = { workspace = true }
+rtrb = { workspace = true }
+rubato = { workspace = true }
+voice_activity_detector = { workspace = true }
+whisper-rs = { workspace = true }
+ureq = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = { workspace = true }
