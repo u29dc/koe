@@ -237,65 +237,65 @@ Justifications:
 Phase 0: Quality gate wiring
 
 - Done criteria:
-  - `bun run util:check` exists and runs format, lint, and tests.
-  - rustfmt and clippy are installed (`rustup component add rustfmt clippy`).
+    - `bun run util:check` exists and runs format, lint, and tests.
+    - rustfmt and clippy are installed (`rustup component add rustfmt clippy`).
 - Smoke tests:
-  - `bun run util:check` completes (even if no tests exist yet).
+    - `bun run util:check` completes (even if no tests exist yet).
 
 Phase 1: Audio capture + chunking
 
 - Done criteria:
-  - ScreenCaptureKit stream starts, audio callbacks firing for system and mic.
-  - Audio processor emits VAD-gated chunks with overlap.
-  - Ring buffer and chunk queue drop metrics visible in status.
+    - ScreenCaptureKit stream starts, audio callbacks firing for system and mic.
+    - Audio processor emits VAD-gated chunks with overlap.
+    - Ring buffer and chunk queue drop metrics visible in status.
 - Smoke tests:
-  - Play system audio and see chunk counters increase.
-  - Speak into mic and see separate stream counters increase.
-  - Artificially pause consumer to confirm drops increment.
+    - Play system audio and see chunk counters increase.
+    - Speak into mic and see separate stream counters increase.
+    - Artificially pause consumer to confirm drops increment.
 
 Phase 2: ASR + transcript ledger + TUI
 
 - Done criteria:
-  - whisper-rs transcribes chunks and renders in transcript pane.
-  - Groq cloud path works and can be switched at runtime.
-  - Mutable window corrections only affect last 15 s.
+    - whisper-rs transcribes chunks and renders in transcript pane.
+    - Groq cloud path works and can be switched at runtime.
+    - Mutable window corrections only affect last 15 s.
 - Smoke tests:
-  - Short utterance appears within 4 s locally, faster on cloud.
-  - Overlap does not duplicate text.
-  - Switch providers without crash.
+    - Short utterance appears within 4 s locally, faster on cloud.
+    - Overlap does not duplicate text.
+    - Switch providers without crash.
 
 Phase 3: Notes engine (patch-only)
 
 - Done criteria:
-  - Ollama and OpenRouter paths both emit NotesPatch.
-  - Notes pane updates without full rewrites.
-  - Stable IDs persist across updates.
+    - Ollama and OpenRouter paths both emit NotesPatch.
+    - Notes pane updates without full rewrites.
+    - Stable IDs persist across updates.
 - Smoke tests:
-  - Decision phrasing triggers new decision item.
-  - Action phrasing triggers new action item.
-  - No duplicates after multiple cycles.
+    - Decision phrasing triggers new decision item.
+    - Action phrasing triggers new action item.
+    - No duplicates after multiple cycles.
 
 Phase 4: Latency comparison + polish
 
 - Done criteria:
-  - Status bar shows ASR lag, drops, and provider.
-  - Export transcript/notes on quit.
+    - Status bar shows ASR lag, drops, and provider.
+    - Export transcript/notes on quit.
 - Smoke tests:
-  - Compare local vs cloud latency over a 3-minute session.
-  - Export produces valid transcript.md and notes.json.
+    - Compare local vs cloud latency over a 3-minute session.
+    - Export produces valid transcript.md and notes.json.
 
 ## Testing Strategy
 
 - Unit tests:
-  - VAD state machine and chunk boundary logic.
-  - Transcript ledger overlap merge and finalize logic.
-  - NotesPatch apply and stable ID handling.
+    - VAD state machine and chunk boundary logic.
+    - Transcript ledger overlap merge and finalize logic.
+    - NotesPatch apply and stable ID handling.
 - Integration tests:
-  - Feed canned WAV chunks through chunker -> ASR mock -> ledger.
-  - Summarizer mock returns patch; state applies correctly.
+    - Feed canned WAV chunks through chunker -> ASR mock -> ledger.
+    - Summarizer mock returns patch; state applies correctly.
 - Manual QA (required):
-  - Permissions prompts, restart behavior, and capture correctness.
-  - Long-running session (30 min) for drop/lag stability.
+    - Permissions prompts, restart behavior, and capture correctness.
+    - Long-running session (30 min) for drop/lag stability.
 
 ## Quality Gates and Commands
 
