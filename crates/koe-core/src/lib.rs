@@ -1,3 +1,9 @@
+pub mod error;
+pub mod types;
+
+pub use error::*;
+pub use types::*;
+
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
