@@ -1,0 +1,27 @@
+crates/koe-core/src/lib.rs
+  24a517254868228a 1-6
+crates/koe-core/src/error.rs
+  24a517254868228a 1-68
+crates/koe-core/src/types.rs
+  24a517254868228a 1-2,4-161
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.40",
+  "base_commit_sha": "5a92a4b123911d5dcc56729d232bf894f6d25362",
+  "prompts": {
+    "24a517254868228a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01404bc0-86c6-4827-a46b-b812da0e7de1",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 235,
+      "total_deletions": 0,
+      "accepted_lines": 234,
+      "overriden_lines": 0
+    }
+  }
+}
