@@ -1,0 +1,25 @@
+crates/koe-core/src/lib.rs
+  b45f4cbea8b78310 5
+crates/koe-core/src/transcript.rs
+  b45f4cbea8b78310 1-224
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.40",
+  "base_commit_sha": "b5044262eb28291aebed6248bdf22e7f8afc4b56",
+  "prompts": {
+    "b45f4cbea8b78310": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5bbbf5ea-8351-44d9-816c-5daf1896fdab",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 225,
+      "total_deletions": 0,
+      "accepted_lines": 225,
+      "overriden_lines": 0
+    }
+  }
+}
