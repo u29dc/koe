@@ -2,6 +2,7 @@ pub mod asr;
 pub mod capture;
 pub mod error;
 pub mod process;
+pub mod transcript;
 pub mod types;
 
 pub use error::*;
