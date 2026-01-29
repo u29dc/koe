@@ -1,0 +1,31 @@
+crates/koe-core/src/asr/groq.rs
+  f20735deb10be0ee 1-58,60-113
+crates/koe-core/src/lib.rs
+  f20735deb10be0ee 1
+Cargo.toml
+  f20735deb10be0ee 27
+crates/koe-core/src/asr/whisper.rs
+  f20735deb10be0ee 1-81
+crates/koe-core/src/asr/mod.rs
+  f20735deb10be0ee 1-17,19-21,23,25-113,115-132,134-138
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.40",
+  "base_commit_sha": "8cd0a14813dd7eac45e1798cb69895c02971b5eb",
+  "prompts": {
+    "f20735deb10be0ee": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "927cdef9-076c-430b-852d-47d44e90fd13",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 301,
+      "total_deletions": 1,
+      "accepted_lines": 328,
+      "overriden_lines": 6
+    }
+  }
+}
