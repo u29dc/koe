@@ -1,0 +1,27 @@
+crates/koe-cli/src/main.rs
+  24a517254868228a 1-4,6-18,20-45,47-85
+crates/koe-cli/Cargo.toml
+  24a517254868228a 16
+Cargo.toml
+  24a517254868228a 33-35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.40",
+  "base_commit_sha": "be935c6eb551e02f57b9e98c83b531b3d3442e0f",
+  "prompts": {
+    "24a517254868228a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01404bc0-86c6-4827-a46b-b812da0e7de1",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 115,
+      "total_deletions": 27,
+      "accepted_lines": 86,
+      "overriden_lines": 0
+    }
+  }
+}
