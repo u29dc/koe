@@ -1,0 +1,25 @@
+crates/koe-core/src/process/mod.rs
+  24a517254868228a 2
+crates/koe-core/src/process/resample.rs
+  24a517254868228a 1-2,4-109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.40",
+  "base_commit_sha": "30051304930631f53a2e80111b0bc17f4d9431af",
+  "prompts": {
+    "24a517254868228a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01404bc0-86c6-4827-a46b-b812da0e7de1",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 108,
+      "total_deletions": 0,
+      "accepted_lines": 109,
+      "overriden_lines": 1
+    }
+  }
+}
