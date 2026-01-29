@@ -1054,6 +1054,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "signal-hook",
  "thiserror 2.0.18",
 ]
 
