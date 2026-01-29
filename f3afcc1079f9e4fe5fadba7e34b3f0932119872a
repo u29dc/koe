@@ -1,0 +1,31 @@
+.cargo/config.toml
+  24a517254868228a 1-5
+crates/koe-core/src/lib.rs
+  24a517254868228a 1
+crates/koe-core/src/capture/sck.rs
+  24a517254868228a 1,3-5,7-110
+crates/koe-core/src/capture/handler.rs
+  24a517254868228a 1-3,5-152
+crates/koe-core/src/capture/mod.rs
+  24a517254868228a 1-18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.40",
+  "base_commit_sha": "f3afcc1079f9e4fe5fadba7e34b3f0932119872a",
+  "prompts": {
+    "24a517254868228a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "01404bc0-86c6-4827-a46b-b812da0e7de1",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 386,
+      "total_deletions": 85,
+      "accepted_lines": 283,
+      "overriden_lines": 0
+    }
+  }
+}
