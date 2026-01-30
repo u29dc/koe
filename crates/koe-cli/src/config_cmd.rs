@@ -124,23 +124,101 @@ fn apply_set(config: &mut Config, assignment: &str) -> Result<(), ConfigError> {
         "audio.microphone_device_id" => {
             config.audio.microphone_device_id = value.to_string();
         }
+        "asr.active" => {
+            config.asr.active = value.to_string();
+        }
+        "asr.local.provider" => {
+            config.asr.local.provider = value.to_string();
+        }
+        "asr.local.model" => {
+            config.asr.local.model = value.to_string();
+        }
+        "asr.local.api_key" => {
+            config.asr.local.api_key = value.to_string();
+        }
+        "asr.cloud.provider" => {
+            config.asr.cloud.provider = value.to_string();
+        }
+        "asr.cloud.model" => {
+            config.asr.cloud.model = value.to_string();
+        }
+        "asr.cloud.api_key" => {
+            config.asr.cloud.api_key = value.to_string();
+        }
         "asr.provider" => {
-            config.asr.provider = value.to_string();
+            set_active_provider(
+                "asr.provider",
+                &config.asr.active,
+                value,
+                &mut config.asr.local.provider,
+                &mut config.asr.cloud.provider,
+            )?;
         }
         "asr.model" => {
-            config.asr.model = value.to_string();
+            set_active_value(
+                "asr.model",
+                &config.asr.active,
+                value,
+                &mut config.asr.local.model,
+                &mut config.asr.cloud.model,
+            )?;
         }
         "asr.api_key" => {
-            config.asr.api_key = value.to_string();
+            set_active_value(
+                "asr.api_key",
+                &config.asr.active,
+                value,
+                &mut config.asr.local.api_key,
+                &mut config.asr.cloud.api_key,
+            )?;
+        }
+        "summarizer.active" => {
+            config.summarizer.active = value.to_string();
+        }
+        "summarizer.local.provider" => {
+            config.summarizer.local.provider = value.to_string();
+        }
+        "summarizer.local.model" => {
+            config.summarizer.local.model = value.to_string();
+        }
+        "summarizer.local.api_key" => {
+            config.summarizer.local.api_key = value.to_string();
+        }
+        "summarizer.cloud.provider" => {
+            config.summarizer.cloud.provider = value.to_string();
+        }
+        "summarizer.cloud.model" => {
+            config.summarizer.cloud.model = value.to_string();
+        }
+        "summarizer.cloud.api_key" => {
+            config.summarizer.cloud.api_key = value.to_string();
         }
         "summarizer.provider" => {
-            config.summarizer.provider = value.to_string();
+            set_active_provider(
+                "summarizer.provider",
+                &config.summarizer.active,
+                value,
+                &mut config.summarizer.local.provider,
+                &mut config.summarizer.cloud.provider,
+            )?;
         }
         "summarizer.model" => {
-            config.summarizer.model = value.to_string();
+            set_active_value(
+                "summarizer.model",
+                &config.summarizer.active,
+                value,
+                &mut config.summarizer.local.model,
+                &mut config.summarizer.cloud.model,
+            )?;
         }
         "summarizer.api_key" => {
-            config.summarizer.api_key = value.to_string();
+            set_active_value(
+                "summarizer.api_key",
+                &config.summarizer.active,
+                value,
+                &mut config.summarizer.local.api_key,
+                &mut config.summarizer.cloud.api_key,
+            )?;
         }
         "summarizer.prompt_profile" => {
             config.summarizer.prompt_profile = value.to_string();
@@ -170,6 +248,38 @@ fn apply_set(config: &mut Config, assignment: &str) -> Result<(), ConfigError> {
         }
     }
     Ok(())
+}
+
+fn set_active_value(
+    label: &str,
+    active: &str,
+    value: &str,
+    local: &mut String,
+    cloud: &mut String,
+) -> Result<(), ConfigError> {
+    match active {
+        "local" => {
+            *local = value.to_string();
+            Ok(())
+        }
+        "cloud" => {
+            *cloud = value.to_string();
+            Ok(())
+        }
+        _ => Err(ConfigError::Validation(format!(
+            "{label} cannot be set because active profile is invalid"
+        ))),
+    }
+}
+
+fn set_active_provider(
+    label: &str,
+    active: &str,
+    value: &str,
+    local: &mut String,
+    cloud: &mut String,
+) -> Result<(), ConfigError> {
+    set_active_value(label, active, value, local, cloud)
 }
 
 fn parse_bool(value: &str, key: &str) -> Result<bool, ConfigError> {

@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-const CONFIG_VERSION: u32 = 1;
+const CONFIG_VERSION: u32 = 2;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -97,17 +97,25 @@ impl Default for AudioConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AsrConfig {
-    pub provider: String,
-    pub model: String,
-    pub api_key: String,
+    pub active: String,
+    pub local: ProviderConfig,
+    pub cloud: ProviderConfig,
 }
 
 impl Default for AsrConfig {
     fn default() -> Self {
         Self {
-            provider: "whisper".to_string(),
-            model: "base.en".to_string(),
-            api_key: String::new(),
+            active: "local".to_string(),
+            local: ProviderConfig {
+                provider: "whisper".to_string(),
+                model: "base.en".to_string(),
+                api_key: String::new(),
+            },
+            cloud: ProviderConfig {
+                provider: "groq".to_string(),
+                model: "whisper-large-v3-turbo".to_string(),
+                api_key: String::new(),
+            },
         }
     }
 }
@@ -115,21 +123,37 @@ impl Default for AsrConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SummarizerConfig {
-    pub provider: String,
-    pub model: String,
-    pub api_key: String,
+    pub active: String,
+    pub local: ProviderConfig,
+    pub cloud: ProviderConfig,
     pub prompt_profile: String,
 }
 
 impl Default for SummarizerConfig {
     fn default() -> Self {
         Self {
-            provider: "ollama".to_string(),
-            model: "qwen3:30b-a3b".to_string(),
-            api_key: String::new(),
+            active: "local".to_string(),
+            local: ProviderConfig {
+                provider: "ollama".to_string(),
+                model: "qwen3:30b-a3b".to_string(),
+                api_key: String::new(),
+            },
+            cloud: ProviderConfig {
+                provider: "openrouter".to_string(),
+                model: "google/gemini-2.5-flash".to_string(),
+                api_key: String::new(),
+            },
             prompt_profile: "minimal".to_string(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderConfig {
+    pub provider: String,
+    pub model: String,
+    pub api_key: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -184,6 +208,7 @@ impl Config {
         let mut migrated = false;
 
         if file_version < CONFIG_VERSION {
+            migrate_legacy_config(&raw, &mut config);
             config.version = CONFIG_VERSION;
             migrated = true;
         } else if file_version > CONFIG_VERSION {
@@ -210,33 +235,28 @@ impl Config {
 
     pub fn redacted(&self) -> Self {
         let mut redacted = self.clone();
-        if !redacted.asr.api_key.trim().is_empty() {
-            redacted.asr.api_key = "<redacted>".to_string();
-        }
-        if !redacted.summarizer.api_key.trim().is_empty() {
-            redacted.summarizer.api_key = "<redacted>".to_string();
-        }
+        redact_provider(&mut redacted.asr.local);
+        redact_provider(&mut redacted.asr.cloud);
+        redact_provider(&mut redacted.summarizer.local);
+        redact_provider(&mut redacted.summarizer.cloud);
         redacted
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
-        match self.asr.provider.as_str() {
-            "whisper" | "groq" => {}
-            other => {
-                return Err(ConfigError::Validation(format!(
-                    "asr.provider must be whisper or groq (got {other})"
-                )));
-            }
-        }
-
-        match self.summarizer.provider.as_str() {
-            "ollama" | "openrouter" => {}
-            other => {
-                return Err(ConfigError::Validation(format!(
-                    "summarizer.provider must be ollama or openrouter (got {other})"
-                )));
-            }
-        }
+        validate_active("asr.active", self.asr.active.as_str())?;
+        validate_active("summarizer.active", self.summarizer.active.as_str())?;
+        validate_asr_profile("asr.local", &self.asr.local, self.asr.active == "local")?;
+        validate_asr_profile("asr.cloud", &self.asr.cloud, self.asr.active == "cloud")?;
+        validate_summarizer_profile(
+            "summarizer.local",
+            &self.summarizer.local,
+            self.summarizer.active == "local",
+        )?;
+        validate_summarizer_profile(
+            "summarizer.cloud",
+            &self.summarizer.cloud,
+            self.summarizer.active == "cloud",
+        )?;
 
         if self.audio.sample_rate == 0 {
             return Err(ConfigError::Validation(
@@ -264,39 +284,9 @@ impl Config {
             }
         }
 
-        if self.asr.model.trim().is_empty() {
-            return Err(ConfigError::Validation(
-                "asr.model must not be empty".into(),
-            ));
-        }
-        if self.asr.provider == "whisper"
-            && looks_like_path(self.asr.model.as_str())
-            && !Path::new(&self.asr.model).exists()
-        {
-            return Err(ConfigError::Validation(format!(
-                "asr.model path not found: {}",
-                self.asr.model
-            )));
-        }
-        if self.asr.provider == "groq" && self.asr.api_key.trim().is_empty() {
-            return Err(ConfigError::Validation(
-                "asr.api_key required when asr.provider=groq".into(),
-            ));
-        }
-
-        if self.summarizer.model.trim().is_empty() {
-            return Err(ConfigError::Validation(
-                "summarizer.model must not be empty".into(),
-            ));
-        }
         if self.summarizer.prompt_profile.trim().is_empty() {
             return Err(ConfigError::Validation(
                 "summarizer.prompt_profile must not be empty".into(),
-            ));
-        }
-        if self.summarizer.provider == "openrouter" && self.summarizer.api_key.trim().is_empty() {
-            return Err(ConfigError::Validation(
-                "summarizer.api_key required when summarizer.provider=openrouter".into(),
             ));
         }
         if self.ui.color_theme.trim().is_empty() {
@@ -362,6 +352,166 @@ fn looks_like_path(value: &str) -> bool {
     value.ends_with(".bin") || value.contains('/') || value.contains(std::path::MAIN_SEPARATOR)
 }
 
+fn validate_active(field: &str, value: &str) -> Result<(), ConfigError> {
+    match value {
+        "local" | "cloud" => Ok(()),
+        other => Err(ConfigError::Validation(format!(
+            "{field} must be local or cloud (got {other})"
+        ))),
+    }
+}
+
+fn validate_asr_profile(
+    label: &str,
+    profile: &ProviderConfig,
+    is_active: bool,
+) -> Result<(), ConfigError> {
+    match profile.provider.as_str() {
+        "whisper" | "groq" => {}
+        other => {
+            return Err(ConfigError::Validation(format!(
+                "{label}.provider must be whisper or groq (got {other})"
+            )));
+        }
+    }
+
+    if profile.model.trim().is_empty() {
+        return Err(ConfigError::Validation(format!(
+            "{label}.model must not be empty"
+        )));
+    }
+    if profile.provider == "whisper"
+        && looks_like_path(profile.model.as_str())
+        && !Path::new(&profile.model).exists()
+    {
+        return Err(ConfigError::Validation(format!(
+            "{label}.model path not found: {}",
+            profile.model
+        )));
+    }
+    if is_active && profile.provider == "groq" && profile.api_key.trim().is_empty() {
+        return Err(ConfigError::Validation(format!(
+            "{label}.api_key required when {label}.provider=groq"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_summarizer_profile(
+    label: &str,
+    profile: &ProviderConfig,
+    is_active: bool,
+) -> Result<(), ConfigError> {
+    match profile.provider.as_str() {
+        "ollama" | "openrouter" => {}
+        other => {
+            return Err(ConfigError::Validation(format!(
+                "{label}.provider must be ollama or openrouter (got {other})"
+            )));
+        }
+    }
+
+    if profile.model.trim().is_empty() {
+        return Err(ConfigError::Validation(format!(
+            "{label}.model must not be empty"
+        )));
+    }
+    if is_active && profile.provider == "openrouter" && profile.api_key.trim().is_empty() {
+        return Err(ConfigError::Validation(format!(
+            "{label}.api_key required when {label}.provider=openrouter"
+        )));
+    }
+    Ok(())
+}
+
+fn redact_provider(profile: &mut ProviderConfig) {
+    if !profile.api_key.trim().is_empty() {
+        profile.api_key = "<redacted>".to_string();
+    }
+}
+
+fn migrate_legacy_config(raw: &toml::Value, config: &mut Config) {
+    let asr_table = raw.get("asr").and_then(|value| value.as_table());
+    let summarizer_table = raw.get("summarizer").and_then(|value| value.as_table());
+
+    if let Some(asr) = asr_table {
+        let provider = asr
+            .get("provider")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        let model = asr
+            .get("model")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        let api_key = asr
+            .get("api_key")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if provider == "groq" {
+            config.asr.cloud.provider = provider;
+            if !model.is_empty() {
+                config.asr.cloud.model = model;
+            }
+            config.asr.cloud.api_key = api_key;
+            config.asr.active = "cloud".to_string();
+        } else if !provider.is_empty() {
+            config.asr.local.provider = provider;
+            if !model.is_empty() {
+                config.asr.local.model = model;
+            }
+            config.asr.local.api_key = api_key;
+            config.asr.active = "local".to_string();
+        }
+    }
+
+    if let Some(summarizer) = summarizer_table {
+        let provider = summarizer
+            .get("provider")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        let model = summarizer
+            .get("model")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        let api_key = summarizer
+            .get("api_key")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        let prompt_profile = summarizer
+            .get("prompt_profile")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if !prompt_profile.is_empty() {
+            config.summarizer.prompt_profile = prompt_profile;
+        }
+
+        if provider == "openrouter" {
+            config.summarizer.cloud.provider = provider;
+            if !model.is_empty() {
+                config.summarizer.cloud.model = model;
+            }
+            config.summarizer.cloud.api_key = api_key;
+            config.summarizer.active = "cloud".to_string();
+        } else if !provider.is_empty() {
+            config.summarizer.local.provider = provider;
+            if !model.is_empty() {
+                config.summarizer.local.model = model;
+            }
+            config.summarizer.local.api_key = api_key;
+            config.summarizer.active = "local".to_string();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CONFIG_VERSION, Config, ConfigPaths};
@@ -378,8 +528,8 @@ mod tests {
         assert!(paths.models_dir.is_dir());
         assert!(paths.sessions_dir.is_dir());
         assert_eq!(config.version, CONFIG_VERSION);
-        assert_eq!(config.asr.provider, "whisper");
-        assert_eq!(config.summarizer.provider, "ollama");
+        assert_eq!(config.asr.local.provider, "whisper");
+        assert_eq!(config.summarizer.local.provider, "ollama");
 
         #[cfg(unix)]
         {
@@ -399,7 +549,7 @@ mod tests {
         let base = temp.path().join("koe");
         let paths = ConfigPaths::from_base(base);
         fs::create_dir_all(&paths.base_dir).unwrap();
-        let content = r#"version = 0
+        let content = r#"version = 1
 
 [asr]
 provider = "whisper"
@@ -411,26 +561,27 @@ api_key = ""
         let config = Config::load(&paths).unwrap();
         assert_eq!(config.version, CONFIG_VERSION);
         assert_eq!(config.ui.color_theme, "minimal");
+        assert_eq!(config.asr.local.provider, "whisper");
 
         let updated = fs::read_to_string(&paths.config_path).unwrap();
-        assert!(updated.contains("version = 1"));
-        assert!(updated.contains("[summarizer]"));
+        assert!(updated.contains("version = 2"));
+        assert!(updated.contains("[summarizer.local]"));
     }
 
     #[test]
     fn redacted_hides_api_keys() {
         let mut config = Config::default();
-        config.asr.api_key = "secret".to_string();
-        config.summarizer.api_key = "secret2".to_string();
+        config.asr.local.api_key = "secret".to_string();
+        config.summarizer.cloud.api_key = "secret2".to_string();
         let redacted = config.redacted();
-        assert_eq!(redacted.asr.api_key, "<redacted>");
-        assert_eq!(redacted.summarizer.api_key, "<redacted>");
+        assert_eq!(redacted.asr.local.api_key, "<redacted>");
+        assert_eq!(redacted.summarizer.cloud.api_key, "<redacted>");
     }
 
     #[test]
     fn validate_rejects_bad_provider() {
         let mut config = Config::default();
-        config.asr.provider = "bad".to_string();
+        config.asr.local.provider = "bad".to_string();
         assert!(config.validate().is_err());
     }
 }

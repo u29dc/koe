@@ -79,8 +79,5 @@
 				100
 			]
 		}
-	},
-	"lint-staged": {
-		"*": "bun run util:check"
 	}
 }

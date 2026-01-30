@@ -1,4 +1,4 @@
-use crate::config::{Config, ConfigError, ConfigPaths};
+use crate::config::{Config, ConfigError, ConfigPaths, ProviderConfig};
 use clap::Args;
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -58,125 +58,82 @@ pub fn run(args: &InitArgs, paths: &ConfigPaths) -> Result<(), InitError> {
     let mut changed = Vec::new();
     let mut kept = Vec::new();
 
-    let prior_asr_provider = config.asr.provider.clone();
-    let current_asr_provider = if args.force {
+    let current_asr_active = if args.force {
         ""
     } else {
-        config.asr.provider.as_str()
+        config.asr.active.as_str()
     };
-    let asr_provider = prompt_provider("ASR provider", &["whisper", "groq"], current_asr_provider)?;
+    let asr_active = prompt_provider("ASR mode", &["local", "cloud"], current_asr_active)?;
     track_update(
-        &mut config.asr.provider,
-        asr_provider,
-        "asr.provider",
+        &mut config.asr.active,
+        asr_active,
+        "asr.active",
         &mut changed,
         &mut kept,
         args.force,
     );
 
-    if config.asr.provider == "whisper" {
-        let current_model = if args.force || prior_asr_provider != "whisper" {
-            None
-        } else {
-            current_whisper_model_name(config.asr.model.as_str())
-        };
-        let model_choice =
-            prompt_model_choice(current_model.as_deref().unwrap_or(DEFAULT_WHISPER_MODEL))?;
-        let model_path = download_model(&model_choice, &paths.models_dir, args.force)?;
-        track_update(
-            &mut config.asr.model,
-            model_path.to_string_lossy().to_string(),
-            "asr.model",
+    let configure_all_asr = args.force;
+    let active_asr = config.asr.active == "local";
+    if active_asr || configure_all_asr {
+        configure_asr_profile(
+            "asr.local",
+            &mut config.asr.local,
+            paths,
+            args,
             &mut changed,
             &mut kept,
-            args.force,
-        );
-    } else {
-        let current_groq_model = if !args.force && prior_asr_provider == "groq" {
-            config.asr.model.as_str()
-        } else {
-            ""
-        };
-        let groq_model = prompt_with_default("Groq model", current_groq_model, DEFAULT_GROQ_MODEL)?;
-        track_update(
-            &mut config.asr.model,
-            groq_model,
-            "asr.model",
+        )?;
+    }
+    if !active_asr || configure_all_asr {
+        configure_asr_profile(
+            "asr.cloud",
+            &mut config.asr.cloud,
+            paths,
+            args,
             &mut changed,
             &mut kept,
-            args.force,
-        );
-        let groq_key = prompt_secret("Groq API key", &config.asr.api_key, args.force)?;
-        track_update(
-            &mut config.asr.api_key,
-            groq_key,
-            "asr.api_key",
-            &mut changed,
-            &mut kept,
-            args.force,
-        );
+        )?;
     }
 
-    let prior_summarizer_provider = config.summarizer.provider.clone();
-    let current_summarizer_provider = if args.force {
+    let current_summarizer_active = if args.force {
         ""
     } else {
-        config.summarizer.provider.as_str()
+        config.summarizer.active.as_str()
     };
-    let summarizer_provider = prompt_provider(
-        "Summarizer provider",
-        &["ollama", "openrouter"],
-        current_summarizer_provider,
+    let summarizer_active = prompt_provider(
+        "Summarizer mode",
+        &["local", "cloud"],
+        current_summarizer_active,
     )?;
     track_update(
-        &mut config.summarizer.provider,
-        summarizer_provider,
-        "summarizer.provider",
+        &mut config.summarizer.active,
+        summarizer_active,
+        "summarizer.active",
         &mut changed,
         &mut kept,
         args.force,
     );
 
-    if config.summarizer.provider == "ollama" {
-        let current_model = if !args.force && prior_summarizer_provider == "ollama" {
-            config.summarizer.model.as_str()
-        } else {
-            ""
-        };
-        let model = prompt_with_default("Ollama model tag", current_model, "qwen3:30b-a3b")?;
-        track_update(
-            &mut config.summarizer.model,
-            model,
-            "summarizer.model",
+    let configure_all_summarizer = args.force;
+    let active_summarizer = config.summarizer.active == "local";
+    if active_summarizer || configure_all_summarizer {
+        configure_summarizer_profile(
+            "summarizer.local",
+            &mut config.summarizer.local,
+            args,
             &mut changed,
             &mut kept,
-            args.force,
-        );
-    } else {
-        let current_model = if !args.force && prior_summarizer_provider == "openrouter" {
-            config.summarizer.model.as_str()
-        } else {
-            ""
-        };
-        let model =
-            prompt_with_default("OpenRouter model", current_model, "google/gemini-2.5-flash")?;
-        track_update(
-            &mut config.summarizer.model,
-            model,
-            "summarizer.model",
+        )?;
+    }
+    if !active_summarizer || configure_all_summarizer {
+        configure_summarizer_profile(
+            "summarizer.cloud",
+            &mut config.summarizer.cloud,
+            args,
             &mut changed,
             &mut kept,
-            args.force,
-        );
-        let key = prompt_secret("OpenRouter API key", &config.summarizer.api_key, args.force)?;
-        track_update(
-            &mut config.summarizer.api_key,
-            key,
-            "summarizer.api_key",
-            &mut changed,
-            &mut kept,
-            args.force,
-        );
+        )?;
     }
 
     config.validate()?;
@@ -353,6 +310,148 @@ fn track_update(
     } else {
         kept.push(label.to_string());
     }
+}
+
+fn configure_asr_profile(
+    label: &str,
+    profile: &mut ProviderConfig,
+    paths: &ConfigPaths,
+    args: &InitArgs,
+    changed: &mut Vec<String>,
+    kept: &mut Vec<String>,
+) -> Result<(), InitError> {
+    let current_provider = if args.force {
+        ""
+    } else {
+        profile.provider.as_str()
+    };
+    let provider = prompt_provider(
+        &format!("{label} provider"),
+        &["whisper", "groq"],
+        current_provider,
+    )?;
+    track_update(
+        &mut profile.provider,
+        provider,
+        &format!("{label}.provider"),
+        changed,
+        kept,
+        args.force,
+    );
+
+    if profile.provider == "whisper" {
+        let current_model = if args.force {
+            None
+        } else {
+            current_whisper_model_name(profile.model.as_str())
+        };
+        let model_choice =
+            prompt_model_choice(current_model.as_deref().unwrap_or(DEFAULT_WHISPER_MODEL))?;
+        let model_path = download_model(&model_choice, &paths.models_dir, args.force)?;
+        track_update(
+            &mut profile.model,
+            model_path.to_string_lossy().to_string(),
+            &format!("{label}.model"),
+            changed,
+            kept,
+            args.force,
+        );
+    } else {
+        let current_groq_model = if args.force {
+            ""
+        } else {
+            profile.model.as_str()
+        };
+        let groq_model = prompt_with_default("Groq model", current_groq_model, DEFAULT_GROQ_MODEL)?;
+        track_update(
+            &mut profile.model,
+            groq_model,
+            &format!("{label}.model"),
+            changed,
+            kept,
+            args.force,
+        );
+        let groq_key = prompt_secret("Groq API key", &profile.api_key, args.force)?;
+        track_update(
+            &mut profile.api_key,
+            groq_key,
+            &format!("{label}.api_key"),
+            changed,
+            kept,
+            args.force,
+        );
+    }
+    Ok(())
+}
+
+fn configure_summarizer_profile(
+    label: &str,
+    profile: &mut ProviderConfig,
+    args: &InitArgs,
+    changed: &mut Vec<String>,
+    kept: &mut Vec<String>,
+) -> Result<(), InitError> {
+    let current_provider = if args.force {
+        ""
+    } else {
+        profile.provider.as_str()
+    };
+    let provider = prompt_provider(
+        &format!("{label} provider"),
+        &["ollama", "openrouter"],
+        current_provider,
+    )?;
+    track_update(
+        &mut profile.provider,
+        provider,
+        &format!("{label}.provider"),
+        changed,
+        kept,
+        args.force,
+    );
+
+    if profile.provider == "ollama" {
+        let current_model = if args.force {
+            ""
+        } else {
+            profile.model.as_str()
+        };
+        let model = prompt_with_default("Ollama model tag", current_model, "qwen3:30b-a3b")?;
+        track_update(
+            &mut profile.model,
+            model,
+            &format!("{label}.model"),
+            changed,
+            kept,
+            args.force,
+        );
+    } else {
+        let current_model = if args.force {
+            ""
+        } else {
+            profile.model.as_str()
+        };
+        let model =
+            prompt_with_default("OpenRouter model", current_model, "google/gemini-2.5-flash")?;
+        track_update(
+            &mut profile.model,
+            model,
+            &format!("{label}.model"),
+            changed,
+            kept,
+            args.force,
+        );
+        let key = prompt_secret("OpenRouter API key", &profile.api_key, args.force)?;
+        track_update(
+            &mut profile.api_key,
+            key,
+            &format!("{label}.api_key"),
+            changed,
+            kept,
+            args.force,
+        );
+    }
+    Ok(())
 }
 
 fn current_whisper_model_name(value: &str) -> Option<String> {

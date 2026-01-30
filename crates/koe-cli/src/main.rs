@@ -6,7 +6,7 @@ mod session;
 mod tui;
 
 use clap::{Parser, Subcommand};
-use config::{Config, ConfigPaths};
+use config::{Config, ConfigPaths, ProviderConfig};
 use koe_core::asr::{AsrProvider, create_asr};
 use koe_core::capture::{CaptureConfig, create_capture, list_audio_inputs};
 use koe_core::process::ChunkRecvTimeoutError;
@@ -37,7 +37,7 @@ enum Command {
 
 #[derive(Parser, Debug, Clone)]
 struct RunArgs {
-    /// ASR provider: whisper or groq
+    /// ASR selection: local, cloud, whisper, or groq
     #[arg(long)]
     asr: Option<String>,
 
@@ -45,7 +45,7 @@ struct RunArgs {
     #[arg(long)]
     model_trn: Option<String>,
 
-    /// Summarizer provider: ollama or openrouter
+    /// Summarizer selection: local, cloud, ollama, or openrouter
     #[arg(long)]
     summarizer: Option<String>,
 
@@ -64,34 +64,30 @@ struct RunArgs {
 
 #[derive(Debug, Clone)]
 struct ResolvedRunArgs {
-    asr: String,
-    model_trn: Option<String>,
-    summarizer: String,
-    model_sum: Option<String>,
+    asr: ResolvedProfile,
+    summarizer: ResolvedProfile,
     context: Option<String>,
     participants: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedProfile {
+    provider: String,
+    model: Option<String>,
+    api_key: String,
+}
+
 impl RunArgs {
     fn resolve(self, config: &Config) -> ResolvedRunArgs {
-        let asr = self.asr.unwrap_or_else(|| config.asr.provider.clone());
-        let summarizer = self
-            .summarizer
-            .unwrap_or_else(|| config.summarizer.provider.clone());
+        let asr_profile = select_asr_profile(config, self.asr.as_deref());
+        let summarizer_profile = select_summarizer_profile(config, self.summarizer.as_deref());
 
-        let config_model_trn = if config.asr.model.trim().is_empty() {
-            None
-        } else {
-            Some(config.asr.model.clone())
-        };
-        let config_model_sum = if config.summarizer.model.trim().is_empty() {
-            None
-        } else {
-            Some(config.summarizer.model.clone())
-        };
-
-        let model_trn = self.model_trn.or(config_model_trn);
-        let model_sum = self.model_sum.or(config_model_sum);
+        let model_trn = self
+            .model_trn
+            .or_else(|| non_empty_value(asr_profile.model.as_str()));
+        let model_sum = self
+            .model_sum
+            .or_else(|| non_empty_value(summarizer_profile.model.as_str()));
         let context = self.context.or_else(|| {
             let value = config.session.context.clone();
             if value.is_empty() { None } else { Some(value) }
@@ -105,13 +101,62 @@ impl RunArgs {
             .collect();
 
         ResolvedRunArgs {
-            asr,
-            model_trn,
-            summarizer,
-            model_sum,
+            asr: ResolvedProfile {
+                provider: asr_profile.provider.clone(),
+                model: model_trn,
+                api_key: asr_profile.api_key.clone(),
+            },
+            summarizer: ResolvedProfile {
+                provider: summarizer_profile.provider.clone(),
+                model: model_sum,
+                api_key: summarizer_profile.api_key.clone(),
+            },
             context,
             participants,
         }
+    }
+}
+
+fn select_asr_profile<'a>(config: &'a Config, selector: Option<&str>) -> &'a ProviderConfig {
+    select_profile(
+        config.asr.active.as_str(),
+        &config.asr.local,
+        &config.asr.cloud,
+        selector,
+    )
+}
+
+fn select_summarizer_profile<'a>(config: &'a Config, selector: Option<&str>) -> &'a ProviderConfig {
+    select_profile(
+        config.summarizer.active.as_str(),
+        &config.summarizer.local,
+        &config.summarizer.cloud,
+        selector,
+    )
+}
+
+fn select_profile<'a>(
+    active: &str,
+    local: &'a ProviderConfig,
+    cloud: &'a ProviderConfig,
+    selector: Option<&str>,
+) -> &'a ProviderConfig {
+    let fallback = if active == "cloud" { cloud } else { local };
+    match selector {
+        Some("local") => local,
+        Some("cloud") => cloud,
+        Some(provider) if local.provider == provider => local,
+        Some(provider) if cloud.provider == provider => cloud,
+        _ => fallback,
+    }
+}
+
+fn non_empty_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -155,24 +200,24 @@ fn main() {
     }
 
     let run = cli.run.resolve(&config);
-    apply_config_env(&config, &run);
+    apply_config_env(&run);
     let stats = CaptureStats::new();
     let stats_display = stats.clone();
     let models_dir = paths.models_dir.clone();
 
     let whisper_model_env = std::env::var("KOE_WHISPER_MODEL").ok();
     let groq_model_env = std::env::var("KOE_GROQ_MODEL").ok();
-    let mut whisper_model = match run.asr.as_str() {
-        "whisper" => run.model_trn.clone().or(whisper_model_env),
+    let mut whisper_model = match run.asr.provider.as_str() {
+        "whisper" => run.asr.model.clone().or(whisper_model_env),
         _ => whisper_model_env,
     };
-    let groq_model = match run.asr.as_str() {
-        "groq" => run.model_trn.clone().or(groq_model_env),
+    let groq_model = match run.asr.provider.as_str() {
+        "groq" => run.asr.model.clone().or(groq_model_env),
         _ => groq_model_env,
     };
 
-    if run.asr == "whisper" {
-        let hint = run.model_trn.as_deref();
+    if run.asr.provider == "whisper" {
+        let hint = run.asr.model.as_deref();
         if let Err(e) = ensure_whisper_model(&mut whisper_model, hint, &models_dir) {
             eprintln!("init failed: {e}");
             std::process::exit(1);
@@ -182,8 +227,12 @@ fn main() {
     let asr_models = tui::AsrModels::new(whisper_model.clone(), groq_model.clone());
 
     let mut asr = match create_asr(
-        run.asr.as_str(),
-        model_for_provider(run.asr.as_str(), &whisper_model, groq_model.as_deref()),
+        run.asr.provider.as_str(),
+        model_for_provider(
+            run.asr.provider.as_str(),
+            &whisper_model,
+            groq_model.as_deref(),
+        ),
     ) {
         Ok(provider) => provider,
         Err(e) => {
@@ -230,7 +279,7 @@ fn main() {
     let asr_thread = match thread::Builder::new()
         .name("koe-asr".into())
         .spawn(move || {
-            let mut current_provider = run.asr.clone();
+            let mut current_provider = run.asr.provider.clone();
             let mut whisper_model = whisper_model;
             let groq_model = groq_model;
             let models_dir = models_dir.clone();
@@ -345,8 +394,8 @@ fn main() {
         shared_writer,
         initial_context: run.context.clone().unwrap_or_default(),
         participants: run.participants.clone(),
-        summarizer_provider: run.summarizer.clone(),
-        summarizer_model: run.model_sum.clone().unwrap_or_default(),
+        summarizer_provider: run.summarizer.provider.clone(),
+        summarizer_model: run.summarizer.model.clone().unwrap_or_default(),
         asr_models,
     };
 
@@ -480,24 +529,23 @@ fn transcribe_with_latency(
     Ok((segments, start.elapsed().as_millis()))
 }
 
-fn apply_config_env(config: &Config, run: &ResolvedRunArgs) {
-    if run.asr == "groq"
-        && !config.asr.api_key.trim().is_empty()
+fn apply_config_env(run: &ResolvedRunArgs) {
+    if run.asr.provider == "groq"
+        && !run.asr.api_key.trim().is_empty()
         && std::env::var("GROQ_API_KEY").is_err()
     {
         unsafe {
-            std::env::set_var("GROQ_API_KEY", config.asr.api_key.trim());
+            std::env::set_var("GROQ_API_KEY", run.asr.api_key.trim());
         }
     }
-    if run.summarizer == "openrouter"
-        && !config.summarizer.api_key.trim().is_empty()
+    if run.summarizer.provider == "openrouter"
+        && !run.summarizer.api_key.trim().is_empty()
         && std::env::var("OPENROUTER_API_KEY").is_err()
     {
         unsafe {
-            std::env::set_var("OPENROUTER_API_KEY", config.summarizer.api_key.trim());
+            std::env::set_var("OPENROUTER_API_KEY", run.summarizer.api_key.trim());
         }
     }
-    let _ = &run.model_sum;
 }
 
 #[cfg(test)]
