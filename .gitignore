@@ -1,7 +1,6 @@
 target/
 *.rs.bk
 node_modules/
-bun.lock
 dist/
 build/
 *.tsbuildinfo
@@ -16,6 +15,7 @@ build/
 .tmp/
 .env
 .env.*
+!.env.example
 models/
 .husky/_/
 .claude/

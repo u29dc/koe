@@ -2,13 +2,20 @@
 
 Real-time meeting transcription and notes engine for macOS, built in Rust with ScreenCaptureKit audio capture, VAD-gated chunking, local/cloud transcribe providers (whisper-rs/Groq), and LLM-powered patch-based summary engine (Ollama/OpenRouter), rendered in a ratatui TUI.
 
-## 1. Repository Structure
+## 1. Documentation
+
+- Rust: https://doc.rust-lang.org/std/
+- ratatui: https://docs.rs/ratatui/latest/ratatui/
+- whisper-rs: https://docs.rs/whisper-rs/latest/whisper_rs/
+- screencapturekit: https://docs.rs/screencapturekit/latest/screencapturekit/
+- clap: https://docs.rs/clap/latest/clap/
+
+## 2. Repository Structure
 
 ```
 koe/
   Cargo.toml              # workspace root (resolver = "3")
   package.json            # bun scripts for quality gates (format, lint, test)
-  biome.json              # extends ~/.config/biome/biome.json
   commitlint.config.js    # conventional commits, scopes: core|cli|web|config|deps
   lint-staged.config.js   # runs bun run util:check
   rustfmt.toml            # Rust formatting rules
@@ -18,29 +25,32 @@ koe/
     koe-cli/              # thin TUI shell: renders core events, forwards commands
 ```
 
-## 2. Stack
+## 3. Stack
 
-| Layer            | Choice                                         | Notes                                |
-| ---------------- | ---------------------------------------------- | ------------------------------------ |
-| Language         | Rust 2024 edition                              | rust-version 1.93.0                  |
-| Audio capture    | screencapturekit 1.5.0                         | macOS 15+, system audio + mic        |
-| Ring buffer      | rtrb 0.3.2                                     | lock-free SPSC for RT callbacks      |
-| Resampling       | rubato 0.16.2                                  | 48k -> 16k high-quality              |
-| VAD              | voice_activity_detector 0.2.1                  | Silero ONNX, 512 samples/32ms frames |
-| Local transcribe | whisper-rs 0.15.1                              | Metal acceleration                   |
-| Cloud transcribe | Groq API                                       | Whisper large-v3-turbo via ureq      |
-| Local summarize  | Ollama                                         | NDJSON streaming via ureq            |
-| Cloud summarize  | OpenRouter API                                 | via ureq                             |
-| TUI              | ratatui 0.30.0 + crossterm 0.29.0              |                                      |
-| CLI              | clap 4.5.56                                    | derive features                      |
-| HTTP             | ureq 3.1.4                                     | json + multipart features            |
-| Serialization    | serde 1.0.228 + serde_json 1.0.149             |                                      |
-| Errors           | thiserror 2.0.18                               |                                      |
-| Signals          | signal-hook 0.3.18                             |                                      |
-| macOS FFI        | core-foundation 0.10.1                         |                                      |
-| Quality gates    | bun + biome + commitlint + husky + lint-staged |                                      |
+| Layer            | Choice                                 | Notes                                |
+| ---------------- | -------------------------------------- | ------------------------------------ |
+| Language         | Rust 2024 edition                      | rust-version 1.93.0                  |
+| Audio capture    | screencapturekit 1.5.0                 | macOS 15+, system audio + mic        |
+| Ring buffer      | rtrb 0.3.2                             | lock-free SPSC for RT callbacks      |
+| Resampling       | rubato 0.16.2                          | 48k -> 16k high-quality              |
+| VAD              | voice_activity_detector 0.2.1          | Silero ONNX, 512 samples/32ms frames |
+| Local transcribe | whisper-rs 0.15.1                      | Metal acceleration                   |
+| Cloud transcribe | Groq API                               | Whisper large-v3-turbo via ureq      |
+| Local summarize  | Ollama                                 | NDJSON streaming via ureq            |
+| Cloud summarize  | OpenRouter API                         | via ureq                             |
+| TUI              | ratatui 0.30.0 + crossterm 0.29.0      |                                      |
+| CLI              | clap 4.5.56                            | derive features                      |
+| HTTP             | ureq 3.1.4                             | json + multipart features            |
+| Serialization    | serde 1.0.228 + serde_json 1.0.149     |                                      |
+| TOML             | toml 0.8.20                            | config parsing                       |
+| Time             | time 0.3.45                            | timestamps, RFC3339                  |
+| Session IDs      | uuid 1.20.0                            | v7 feature, time-ordered             |
+| Errors           | thiserror 2.0.18                       |                                      |
+| Signals          | signal-hook 0.3.18                     |                                      |
+| macOS FFI        | core-foundation 0.10.1                 |                                      |
+| Quality gates    | bun + commitlint + husky + lint-staged |                                      |
 
-## 3. Architecture
+## 4. Architecture
 
 Workspace layout: `crates/koe-core` (engine, zero UI deps) + `crates/koe-cli` (thin TUI adapter rendering core events and forwarding commands back); future macOS Swift UI replaces CLI via IPC to core without touching engine logic; all providers and capture backends live behind traits in koe-core.
 
@@ -59,11 +69,11 @@ ScreenCaptureKit (system audio + mic)
 
 Responsibilities: ScreenCaptureKit adapter (enumerate/configure/stream), RT callback (copy into ring buffer, return), audio processor (PTS align, mix, resample 48k→16k), VAD+chunker, transcribe provider, transcript ledger (overlap merge + finalize window), notes engine (patch ops), TUI (render + status + hotkeys). Threading: ScreenCaptureKit queue → SPSC ring buffers; processor drains → chunk queue (sync_channel cap 4, drop-oldest); transcribe worker emits segments; notes thread emits patches; UI consumes merged events. Event/command surface: `CoreEvent` (transcript/notes/status/stats/errors) and `CoreCommand` (start/stop/mode/force/export/pause), transported via in-process channels; NDJSON over stdout/Unix socket reserved for future Swift UI.
 
-## 4. Technical Decisions
+## 5. Technical Decisions
 
 macOS 15+ only (ScreenCaptureKit, no legacy fallback; Screen Recording + Microphone permissions, restart often required); audio capture via ScreenCaptureKit with `captures_audio=true`, audio-only output with tiny-video fallback for callbacks, mic via ScreenCaptureKit (no cpal); VAD/chunking: Silero 512-sample frames @16 kHz (32 ms), threshold 0.5, min speech 200 ms, hangover 300 ms, chunks target 4.0 s with 1.0 s overlap (min 2.0 s, max 6.0 s); backpressure: 10 s ring per stream, chunk queue cap 4 drop-oldest, notes queue cap 1 skip-if-busy; notes: append-only bullets with stable IDs, summarize finalized segments only, cadence every 10 s or on keyword triggers; speaker labels: mic → “Me”, system → “Them”, mixed → “Unknown”.
 
-## 5. Commands
+## 6. Commands
 
 | Command                 | Description                                                          |
 | ----------------------- | -------------------------------------------------------------------- |
@@ -73,22 +83,26 @@ macOS 15+ only (ScreenCaptureKit, no legacy fallback; Screen Recording + Microph
 | `bun run util:lint`     | `cargo clippy --all-targets --all-features -- -D warnings`           |
 | `bun run util:test`     | `cargo test --all`                                                   |
 | `bun run util:check`    | runs format + lint + test sequentially, exits nonzero on any failure |
+| `bun run util:clean`    | `cargo clean`                                                        |
+| `bun run koe -- init`   | interactive onboarding: model download, provider/key config          |
+| `bun run koe -- config` | `--print`/`--set`/`--edit` for `~/.koe/config.toml`                  |
 
-## 6. Local Setup and Testing
+## 7. Local Setup and Testing
 
+- Requires Rust 1.93.0+ (`rustup update stable`).
 - Run `bun run koe -- init` to download a Whisper model and write `~/.koe/config.toml` (interactive onboarding for transcribe/summarize provider, model, and API keys).
 - Alternate model: `bun run koe -- init --model small`.
 - Run local transcribe: `bun run koe -- --transcribe local`.
 - Run cloud transcribe: `bun run koe -- --transcribe cloud`.
 - Environment variables (`KOE_TRANSCRIBE_CLOUD_API_KEY`, `KOE_SUMMARIZE_CLOUD_API_KEY`) are optional overrides; `~/.koe/config.toml` is canonical.
 
-## 7. Quality
+## 8. Quality
 
 Zero clippy warnings (`-D warnings`), `cargo fmt --all` enforced, all tests passing, pre-commit hooks run full `util:check` via lint-staged, commitlint enforces conventional commits with domain scopes (core, cli, web, config, deps).
 
 Testing strategy: unit tests for VAD state machine and chunk boundary logic, transcript ledger overlap merge and finalize logic, NotesPatch apply and stable ID handling; integration tests feed canned WAV chunks through chunker -> transcribe mock -> ledger and summarize mock returns patch with state application; manual QA for permissions prompts, restart behavior, capture correctness, and 30-min long-running session stability.
 
-## 8. Roadmap
+## 9. Roadmap
 
 Phase 0: Quality gate wiring
 
@@ -343,7 +357,3 @@ Phase 7: Audio quality improvements
         - BLOCKED: Requires live capture and UI rendering; cannot verify animation in this environment; tried only code-level implementation; next steps: run `bun run koe`, start meeting, observe waveform animation; end meeting and confirm flat line; file refs: `crates/koe-cli/src/tui.rs`.
     - [ ] All actions (switch provider, edit context, end meeting, copy exports) accessible and functional through palette only.
         - BLOCKED: Requires manual palette interaction and system integrations (clipboard/open); cannot exercise in non-interactive session; tried only code-level wiring; next steps: run `bun run koe`, open palette and execute each command, confirm expected behavior; file refs: `crates/koe-cli/src/tui.rs`.
-
-## 9. Resolved Decisions
-
-macOS 15+ only (no legacy), Silero VAD for quality with tuned parameters, local + cloud providers for transcribe and summarize from day one, stream-based speaker labeling (mic -> Me, system -> Them).
