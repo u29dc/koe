@@ -13,6 +13,7 @@ pub trait SummarizerProvider: Send {
         &mut self,
         recent_segments: &[TranscriptSegment],
         state: &MeetingState,
+        context: Option<&str>,
         on_event: &mut dyn FnMut(SummarizerEvent),
     ) -> Result<(), SummarizerError>;
 }

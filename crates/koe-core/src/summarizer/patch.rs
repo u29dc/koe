@@ -2,16 +2,24 @@ use crate::SummarizerError;
 use crate::types::{MeetingState, NotesOp, NotesPatch, TranscriptSegment};
 use serde::Deserialize;
 
-pub(crate) fn build_prompt(recent: &[TranscriptSegment], state: &MeetingState) -> String {
+pub(crate) fn build_prompt(
+    recent: &[TranscriptSegment],
+    state: &MeetingState,
+    context: Option<&str>,
+) -> String {
     let transcript = recent
         .iter()
         .map(|s| format!("[{}-{}] {}", s.start_ms, s.end_ms, s.text.trim()))
         .collect::<Vec<_>>()
         .join("\n");
     let state_json = serde_json::to_string(state).unwrap_or_else(|_| "{}".to_string());
+    let context_block = context
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("Context:\n{value}\n\n"))
+        .unwrap_or_default();
 
     format!(
-        "You are a meeting notes engine. Return ONLY valid JSON with this schema:\n{{\n  \"ops\": [\n    {{\"op\": \"add_key_point\", \"id\": \"kp_1\", \"text\": \"...\", \"evidence\": [1,2]}}\n  ]\n}}\n\nRules:\n- patch-only: add/update ops only, no deletes\n- stable IDs: reuse IDs when updating\n- evidence is a list of transcript segment IDs\n- if no updates, return {{\"ops\": []}}\n\nTranscript:\n{transcript}\n\nCurrent state JSON:\n{state_json}\n"
+        "You are a meeting notes engine. Return ONLY valid JSON with this schema:\n{{\n  \"ops\": [\n    {{\"op\": \"add_key_point\", \"id\": \"kp_1\", \"text\": \"...\", \"evidence\": [1,2]}}\n  ]\n}}\n\nRules:\n- patch-only: add/update ops only, no deletes\n- stable IDs: reuse IDs when updating\n- evidence is a list of transcript segment IDs\n- if no updates, return {{\"ops\": []}}\n\n{context_block}Transcript:\n{transcript}\n\nCurrent state JSON:\n{state_json}\n"
     )
 }
 
@@ -147,7 +155,18 @@ mod tests {
 
     #[test]
     fn build_prompt_includes_transcript() {
-        let prompt = build_prompt(&[seg(1, "hello")], &MeetingState::default());
+        let prompt = build_prompt(&[seg(1, "hello")], &MeetingState::default(), None);
         assert!(prompt.contains("Transcript:"));
+    }
+
+    #[test]
+    fn build_prompt_includes_context() {
+        let prompt = build_prompt(
+            &[seg(1, "hello")],
+            &MeetingState::default(),
+            Some("team sync"),
+        );
+        assert!(prompt.contains("Context:"));
+        assert!(prompt.contains("team sync"));
     }
 }
