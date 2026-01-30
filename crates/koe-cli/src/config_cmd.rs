@@ -1,5 +1,6 @@
 use crate::config::{Config, ConfigError, ConfigPaths};
 use clap::Args;
+use koe_core::capture::list_audio_inputs as list_input_devices;
 use std::process::Command;
 
 #[derive(Args, Debug, Clone)]
@@ -7,6 +8,10 @@ pub struct ConfigArgs {
     /// Print config with secrets redacted
     #[arg(long)]
     pub print: bool,
+
+    /// List available audio input devices
+    #[arg(long)]
+    pub list_inputs: bool,
 
     /// Edit config in $EDITOR
     #[arg(long)]
@@ -18,6 +23,11 @@ pub struct ConfigArgs {
 }
 
 pub fn run(args: &ConfigArgs, paths: &ConfigPaths) -> Result<(), ConfigError> {
+    if args.list_inputs {
+        list_audio_inputs();
+        return Ok(());
+    }
+
     if args.edit && (!args.set.is_empty() || args.print) {
         return Err(ConfigError::Validation(
             "--edit cannot be combined with --set or --print".into(),
@@ -65,6 +75,24 @@ fn edit_config(paths: &ConfigPaths) -> Result<(), ConfigError> {
     Ok(())
 }
 
+fn list_audio_inputs() {
+    let devices = list_input_devices();
+    if devices.is_empty() {
+        println!("no audio input devices found");
+        return;
+    }
+
+    println!("audio input devices:");
+    for device in devices {
+        if device.is_default {
+            println!("- {} (default)\n  id: {}", device.name, device.id);
+        } else {
+            println!("- {}\n  id: {}", device.name, device.id);
+        }
+    }
+    println!("set with: koe config --set audio.microphone_device_id=DEVICE_ID");
+}
+
 fn apply_set(config: &mut Config, assignment: &str) -> Result<(), ConfigError> {
     let (key, value) = assignment
         .split_once('=')
@@ -92,6 +120,9 @@ fn apply_set(config: &mut Config, assignment: &str) -> Result<(), ConfigError> {
         "audio.sources" => {
             let sources = parse_sources(value)?;
             config.audio.sources = sources;
+        }
+        "audio.microphone_device_id" => {
+            config.audio.microphone_device_id = value.to_string();
         }
         "asr.provider" => {
             config.asr.provider = value.to_string();

@@ -80,6 +80,7 @@ pub struct AudioConfig {
     pub sample_rate: u32,
     pub channels: u16,
     pub sources: Vec<String>,
+    pub microphone_device_id: String,
 }
 
 impl Default for AudioConfig {
@@ -88,6 +89,7 @@ impl Default for AudioConfig {
             sample_rate: 48_000,
             channels: 1,
             sources: vec!["system".to_string(), "microphone".to_string()],
+            microphone_device_id: String::new(),
         }
     }
 }

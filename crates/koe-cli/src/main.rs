@@ -8,7 +8,7 @@ mod tui;
 use clap::{Parser, Subcommand};
 use config::{Config, ConfigPaths};
 use koe_core::asr::{AsrProvider, create_asr};
-use koe_core::capture::create_capture;
+use koe_core::capture::{CaptureConfig, create_capture};
 use koe_core::process::ChunkRecvTimeoutError;
 use koe_core::types::{AudioSource, CaptureStats, NotesPatch};
 use raw_audio::SharedRawAudioWriter;
@@ -194,7 +194,9 @@ fn main() {
 
     let shared_writer = SharedRawAudioWriter::new(None);
 
-    let capture = match create_capture(stats.clone()) {
+    let capture_config =
+        capture_config_from_sources(&config.audio.sources, &config.audio.microphone_device_id);
+    let capture = match create_capture(stats.clone(), capture_config) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("capture init failed: {e}");
@@ -419,6 +421,25 @@ fn export_dir_from_config(paths: &ConfigPaths, value: &str) -> Option<PathBuf> {
         Some(path)
     } else {
         Some(paths.base_dir.join(path))
+    }
+}
+
+fn capture_config_from_sources(sources: &[String], mic_device_id: &str) -> CaptureConfig {
+    let capture_system = sources
+        .iter()
+        .any(|source| matches!(source.as_str(), "system" | "mixed"));
+    let capture_microphone = sources
+        .iter()
+        .any(|source| matches!(source.as_str(), "microphone" | "mixed"));
+    let microphone_device_id = if mic_device_id.trim().is_empty() {
+        None
+    } else {
+        Some(mic_device_id.trim().to_string())
+    };
+    CaptureConfig {
+        capture_system,
+        capture_microphone,
+        microphone_device_id,
     }
 }
 
