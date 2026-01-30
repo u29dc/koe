@@ -21,6 +21,7 @@ struct AudioProducer {
     samples: rtrb::Producer<f32>,
     pts: rtrb::Producer<(i128, usize)>,
     drop_count: Arc<AtomicU64>,
+    mono_scratch: Vec<f32>,
 }
 
 /// Shared state between system and microphone output handlers.
@@ -53,11 +54,13 @@ pub fn create_output_handlers(
             samples: sys_samples_prod,
             pts: sys_pts_prod,
             drop_count: Arc::new(AtomicU64::new(0)),
+            mono_scratch: Vec::with_capacity(RING_CAPACITY),
         }),
         mic_producer: Mutex::new(AudioProducer {
             samples: mic_samples_prod,
             pts: mic_pts_prod,
             drop_count: Arc::new(AtomicU64::new(0)),
+            mono_scratch: Vec::with_capacity(RING_CAPACITY),
         }),
         stats,
     });
@@ -88,7 +91,8 @@ impl SCStreamOutputTrait for OutputHandler {
             SCStreamOutputType::Screen => return,
         };
 
-        let Ok(mut producer) = mutex.lock() else {
+        let Ok(mut producer) = mutex.try_lock() else {
+            self.state.stats.inc_frames_dropped();
             return;
         };
 
@@ -116,25 +120,26 @@ impl SCStreamOutputTrait for OutputHandler {
             let f32_slice =
                 unsafe { std::slice::from_raw_parts(raw_bytes.as_ptr().cast::<f32>(), f32_count) };
 
-            // Convert to mono by averaging channels if stereo
-            let mono_samples: Vec<f32>;
-            let samples: &[f32] = if channels > 1 {
-                let frame_count = f32_slice.len() / channels;
-                mono_samples = (0..frame_count)
-                    .map(|i| {
-                        let sum: f32 = (0..channels).map(|ch| f32_slice[i * channels + ch]).sum();
-                        sum / channels as f32
-                    })
-                    .collect();
-                &mono_samples
-            } else {
-                f32_slice
+            let AudioProducer {
+                samples: samples_prod,
+                pts: pts_prod,
+                drop_count,
+                mono_scratch,
+            } = &mut *producer;
+
+            let samples = match downmix_to_mono(f32_slice, channels, mono_scratch) {
+                Some(samples) => samples,
+                None => {
+                    drop_count.fetch_add(1, Ordering::Relaxed);
+                    self.state.stats.inc_frames_dropped();
+                    return;
+                }
             };
 
             // Check if ring has space
-            let available = producer.samples.slots();
+            let available = samples_prod.slots();
             if available < samples.len() {
-                producer.drop_count.fetch_add(1, Ordering::Relaxed);
+                drop_count.fetch_add(1, Ordering::Relaxed);
                 self.state.stats.inc_frames_dropped();
                 return;
             }
@@ -142,7 +147,7 @@ impl SCStreamOutputTrait for OutputHandler {
             // Write samples
             let mut written = 0;
             while written < samples.len() {
-                match producer.samples.write_chunk_uninit(samples.len() - written) {
+                match samples_prod.write_chunk_uninit(samples.len() - written) {
                     Ok(mut chunk) => {
                         let len = chunk.len();
                         let (first, second) = chunk.as_mut_slices();
@@ -165,7 +170,78 @@ impl SCStreamOutputTrait for OutputHandler {
             }
 
             // Record PTS entry
-            let _ = producer.pts.push((pts_ns, samples.len()));
+            let _ = pts_prod.push((pts_ns, samples.len()));
         }
+    }
+}
+
+fn downmix_to_mono<'a>(
+    interleaved: &'a [f32],
+    channels: usize,
+    scratch: &'a mut Vec<f32>,
+) -> Option<&'a [f32]> {
+    if interleaved.is_empty() {
+        return Some(&[]);
+    }
+
+    if channels == 0 {
+        return None;
+    }
+
+    if channels == 1 {
+        return Some(interleaved);
+    }
+
+    let frames = interleaved.len() / channels;
+    if frames == 0 {
+        return Some(&[]);
+    }
+
+    if frames > scratch.capacity() {
+        return None;
+    }
+
+    scratch.clear();
+    scratch.resize(frames, 0.0);
+
+    for (frame, slot) in scratch.iter_mut().enumerate().take(frames) {
+        let mut sum = 0.0;
+        let base = frame * channels;
+        for ch in 0..channels {
+            sum += interleaved[base + ch];
+        }
+        *slot = sum / channels as f32;
+    }
+
+    Some(&scratch[..frames])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::downmix_to_mono;
+
+    #[test]
+    fn downmix_returns_input_for_mono() {
+        let mut scratch = Vec::with_capacity(8);
+        let input = [0.1, -0.2, 0.3];
+        let output = downmix_to_mono(&input, 1, &mut scratch).unwrap();
+        assert_eq!(output, &input);
+        assert!(scratch.is_empty());
+    }
+
+    #[test]
+    fn downmix_averages_channels() {
+        let mut scratch = Vec::with_capacity(4);
+        let input = [1.0, 3.0, 2.0, 4.0];
+        let output = downmix_to_mono(&input, 2, &mut scratch).unwrap();
+        assert_eq!(output, &[2.0, 3.0]);
+    }
+
+    #[test]
+    fn downmix_refuses_to_allocate() {
+        let mut scratch = Vec::with_capacity(1);
+        let input = [1.0, 3.0, 2.0, 4.0];
+        assert!(downmix_to_mono(&input, 2, &mut scratch).is_none());
+        assert_eq!(scratch.capacity(), 1);
     }
 }
