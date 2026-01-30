@@ -120,6 +120,9 @@ fn apply_set(config: &mut Config, assignment: &str) -> Result<(), ConfigError> {
         "session.participants" => {
             config.session.participants = parse_participants(value)?;
         }
+        "session.export_dir" => {
+            config.session.export_dir = value.to_string();
+        }
         "ui.show_transcript" => {
             config.ui.show_transcript = parse_bool(value, key)?;
         }

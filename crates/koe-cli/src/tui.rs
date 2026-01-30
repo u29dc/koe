@@ -14,7 +14,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use std::io;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::thread;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
@@ -93,7 +94,7 @@ pub fn run(
     let mut stdout = io::stdout();
     crossterm::execute!(stdout, EnterAlternateScreen)?;
     let _terminal_guard = TerminalGuard;
-    let _processor_guard = ProcessorGuard::new(processor);
+    let processor_guard = ProcessorGuard::new(processor);
 
     // Panic hook to restore terminal on panic
     let original_hook = std::panic::take_hook();
@@ -296,6 +297,8 @@ pub fn run(
         }
     }
 
+    drop(processor_guard);
+    export_session_with_timeout(session, ledger.segments().to_vec(), meeting_state)?;
     Ok(())
 }
 
@@ -378,6 +381,30 @@ fn render_notes_lines(state: &MeetingState, theme: &UiTheme) -> Vec<Line<'static
     }
 
     lines
+}
+
+fn export_session_with_timeout(
+    mut session: SessionHandle,
+    segments: Vec<TranscriptSegment>,
+    state: MeetingState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (tx, rx) = channel();
+    thread::spawn(move || {
+        let result = session.export_on_exit(&segments, &state);
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            eprintln!("export failed: {err}");
+        }
+        Err(_) => {
+            eprintln!("export timed out after 2s");
+        }
+    }
+
+    Ok(())
 }
 
 fn apply_notes_patch(state: &mut MeetingState, patch: NotesPatch) -> bool {

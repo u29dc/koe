@@ -13,6 +13,7 @@ use koe_core::types::{AudioFrame, AudioSource, CaptureStats, NotesPatch};
 use session::SessionHandle;
 use std::collections::VecDeque;
 use std::io::{BufWriter, Write};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -401,6 +402,19 @@ fn model_for_provider<'a>(
     }
 }
 
+fn export_dir_from_config(paths: &ConfigPaths, value: &str) -> Option<PathBuf> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        Some(paths.base_dir.join(path))
+    }
+}
+
 struct RawAudioWriter {
     file: BufWriter<std::fs::File>,
     system: VecDeque<f32>,
@@ -527,7 +541,8 @@ fn create_session(
         summarizer_provider: run.summarizer.clone(),
         summarizer_model,
     })?;
-    session::SessionHandle::start(paths, metadata)
+    let export_dir = export_dir_from_config(paths, &config.session.export_dir);
+    session::SessionHandle::start(paths, metadata, export_dir)
 }
 
 #[cfg(test)]

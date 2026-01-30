@@ -135,6 +135,7 @@ impl Default for SummarizerConfig {
 pub struct SessionConfig {
     pub context: String,
     pub participants: Vec<String>,
+    pub export_dir: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

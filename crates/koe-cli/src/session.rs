@@ -106,13 +106,18 @@ impl SessionMetadata {
 #[derive(Debug)]
 pub struct SessionHandle {
     dir: PathBuf,
+    export_dir: Option<PathBuf>,
     metadata_path: PathBuf,
     context_path: PathBuf,
     metadata: SessionMetadata,
 }
 
 impl SessionHandle {
-    pub fn start(paths: &ConfigPaths, metadata: SessionMetadata) -> Result<Self, SessionError> {
+    pub fn start(
+        paths: &ConfigPaths,
+        metadata: SessionMetadata,
+        export_dir: Option<PathBuf>,
+    ) -> Result<Self, SessionError> {
         fs::create_dir_all(&paths.sessions_dir)?;
         let dir = paths.sessions_dir.join(&metadata.id);
         fs::create_dir_all(&dir)?;
@@ -136,6 +141,7 @@ impl SessionHandle {
 
         Ok(Self {
             dir,
+            export_dir,
             metadata_path,
             context_path,
             metadata,
@@ -191,6 +197,95 @@ impl SessionHandle {
         Ok(())
     }
 
+    pub fn export_transcript_markdown(
+        &self,
+        segments: &[TranscriptSegment],
+    ) -> Result<(), SessionError> {
+        let export_root = self.export_root()?;
+        let path = export_root.join("transcript.md");
+        let mut output = String::from("# Transcript\n");
+        if segments.is_empty() {
+            output.push_str("- (empty)\n");
+        } else {
+            for segment in segments {
+                let start = format_timestamp(segment.start_ms);
+                let end = format_timestamp(segment.end_ms);
+                let speaker = segment.speaker.as_deref().unwrap_or("Unknown");
+                let text = segment.text.replace('\n', " ").trim().to_string();
+                output.push_str(&format!("- [{start}-{end}] {speaker}: {text}\n"));
+            }
+        }
+        write_atomic(&path, output.as_bytes())?;
+        Ok(())
+    }
+
+    pub fn export_notes_markdown(&self, state: &MeetingState) -> Result<(), SessionError> {
+        let export_root = self.export_root()?;
+        let path = export_root.join("notes.md");
+        let mut output = String::from("# Notes\n\n");
+
+        output.push_str("## Key points\n");
+        if state.key_points.is_empty() {
+            output.push_str("- (none)\n");
+        } else {
+            for item in &state.key_points {
+                output.push_str(&format!("- {}\n", item.text.trim()));
+            }
+        }
+
+        output.push_str("\n## Actions\n");
+        if state.actions.is_empty() {
+            output.push_str("- (none)\n");
+        } else {
+            for item in &state.actions {
+                let mut suffix = Vec::new();
+                if let Some(owner) = item.owner.as_deref() {
+                    suffix.push(format!("owner: {owner}"));
+                }
+                if let Some(due) = item.due.as_deref() {
+                    suffix.push(format!("due: {due}"));
+                }
+                if suffix.is_empty() {
+                    output.push_str(&format!("- {}\n", item.text.trim()));
+                } else {
+                    output.push_str(&format!("- {} ({})\n", item.text.trim(), suffix.join(", ")));
+                }
+            }
+        }
+
+        output.push_str("\n## Decisions\n");
+        if state.decisions.is_empty() {
+            output.push_str("- (none)\n");
+        } else {
+            for item in &state.decisions {
+                output.push_str(&format!("- {}\n", item.text.trim()));
+            }
+        }
+
+        write_atomic(&path, output.as_bytes())?;
+        Ok(())
+    }
+
+    pub fn export_on_exit(
+        &mut self,
+        segments: &[TranscriptSegment],
+        state: &MeetingState,
+    ) -> Result<(), SessionError> {
+        self.write_notes(state)?;
+        self.export_transcript_markdown(segments)?;
+        self.export_notes_markdown(state)?;
+        self.finalize()
+    }
+
+    pub fn finalize(&mut self) -> Result<(), SessionError> {
+        let end_time = OffsetDateTime::now_utc().format(&Rfc3339)?;
+        self.metadata.end_time = Some(end_time.clone());
+        self.metadata.last_update = end_time;
+        self.metadata.finalized = true;
+        write_metadata(&self.metadata_path, &self.metadata)?;
+        Ok(())
+    }
+
     fn audio_raw_path(&self) -> PathBuf {
         self.dir.join(&self.metadata.audio_raw_file)
     }
@@ -201,6 +296,15 @@ impl SessionHandle {
 
     fn notes_path(&self) -> PathBuf {
         self.dir.join(&self.metadata.notes_file)
+    }
+
+    fn export_root(&self) -> Result<PathBuf, SessionError> {
+        let root = match &self.export_dir {
+            Some(base) => base.join(&self.metadata.id),
+            None => self.dir.clone(),
+        };
+        fs::create_dir_all(&root)?;
+        Ok(root)
     }
 
     fn touch_metadata(&mut self) -> Result<(), SessionError> {
@@ -263,4 +367,11 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), SessionError> {
     fs::write(&tmp_path, contents)?;
     fs::rename(tmp_path, path)?;
     Ok(())
+}
+
+fn format_timestamp(ms: i64) -> String {
+    let total_seconds = ms.max(0) / 1000;
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes:02}:{seconds:02}")
 }
