@@ -153,13 +153,20 @@ pub trait SummarizerProvider: Send {
 | `bun run util:test`     | `cargo test --all`                                                   |
 | `bun run util:check`    | runs format + lint + test sequentially, exits nonzero on any failure |
 
-## 7. Quality
+## 7. Local Setup and Testing
+
+- Set `.env` with `GROQ_API_KEY=...` and `KOE_WHISPER_MODEL=/Users/han/.koe/models/ggml-base.en.bin`.
+- Download model and update `.env`: `./scripts/koe-init.sh` (writes to `~/.koe/models`).
+- Run local or cloud: `./scripts/koe-whisper.sh` or `./scripts/koe-groq.sh`.
+- Alternate model: `./scripts/koe-init.sh --model small`, then `./scripts/koe-whisper.sh`.
+
+## 8. Quality
 
 Zero clippy warnings (`-D warnings`), `cargo fmt --all` enforced, all tests passing, pre-commit hooks run full `util:check` via lint-staged, commitlint enforces conventional commits with domain scopes (core, cli, web, config, deps).
 
 Testing strategy: unit tests for VAD state machine and chunk boundary logic, transcript ledger overlap merge and finalize logic, NotesPatch apply and stable ID handling; integration tests feed canned WAV chunks through chunker -> ASR mock -> ledger and summarizer mock returns patch with state application; manual QA for permissions prompts, restart behavior, capture correctness, and 30-min long-running session stability.
 
-## 8. Roadmap
+## 9. Roadmap
 
 Phase 0: Quality gate wiring
 
@@ -185,7 +192,7 @@ Phase 1: Audio capture + chunking
 - Done criteria:
     - [x] ScreenCaptureKit stream starts and system audio callbacks fire (`crates/koe-core/src/capture/sck.rs`).
         - Confirm the stream is configured with `captures_audio=true` and a content filter that actually yields audio callbacks. The output handler should be registered on `SCStreamOutputType::Audio` and should be receiving buffers. Watch for errors at `start_capture()` for permission or display availability issues.
-    - [ ] Microphone callbacks fire (microphone output handler not registered; `crates/koe-core/src/capture/sck.rs:48`).
+    - [x] Microphone callbacks fire (`crates/koe-core/src/capture/sck.rs:49`).
         - Register the output handler for `SCStreamOutputType::Microphone` in addition to Audio. Ensure the handler routes microphone buffers into the mic ring buffer and that the mic ring is drained in `try_recv_mic`. Validate by speaking and watching mic counters increase separately from system audio.
     - [x] Audio processor emits VAD-gated chunks with overlap (`crates/koe-core/src/process/mod.rs`, `crates/koe-core/src/process/chunker.rs`).
         - The processor should read from the capture rings, resample to 16 kHz, run VAD, and feed the chunker with the correct sample rate. Confirm the overlap behavior by inspecting chunk sizes around the target and max sizes. Maintain the 2s/4s/6s/1s policy to keep downstream ASR costs predictable.
