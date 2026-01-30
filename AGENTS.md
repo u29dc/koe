@@ -202,7 +202,7 @@ Phase 1: Audio capture + chunking
         - The plan specifies freshness over completeness, which means dropping the oldest pending chunk when the queue is full. Implement this by draining one item before enqueueing or by switching to a custom ring queue. Ensure you still count drops so the status bar reflects overload.
     - [x] RT callback avoids locks/allocations (Mutex + Vec allocations in handler).
         - The capture callback should not block; remove mutex locking in the callback path or convert it to a lock-free or try-lock path that drops when contended. Avoid heap allocation for mono conversion in the callback; preallocate buffers or move the conversion to the consumer thread. This reduces priority inversion and avoids audio glitches under load.
-    - [ ] PTS alignment is accurate for drained batches.
+    - [x] PTS alignment is accurate for drained batches.
         - `drain_ring` currently uses the most recent PTS for all samples; instead, track PTS per buffer and compute start PTS for the batch. A safe approach is to record `(pts, len)` for each callback and derive a running start offset. Validate timestamps by comparing against known audio markers.
 - Smoke tests:
     - [ ] Play system audio and see chunk counters increase.

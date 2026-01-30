@@ -7,6 +7,7 @@ use screencapturekit::stream::configuration::SCStreamConfiguration;
 use screencapturekit::stream::content_filter::SCContentFilter;
 use screencapturekit::stream::output_type::SCStreamOutputType;
 use screencapturekit::stream::sc_stream::SCStream;
+use std::collections::VecDeque;
 
 const SAMPLE_RATE: u32 = 48_000;
 
@@ -15,6 +16,8 @@ pub struct SckCapture {
     stream: Option<SCStream>,
     system_ring: AudioRing,
     mic_ring: AudioRing,
+    system_pts: PtsTracker,
+    mic_pts: PtsTracker,
 }
 
 impl SckCapture {
@@ -53,10 +56,12 @@ impl SckCapture {
             stream: Some(stream),
             system_ring,
             mic_ring,
+            system_pts: PtsTracker::new(),
+            mic_pts: PtsTracker::new(),
         })
     }
 
-    fn drain_ring(ring: &mut AudioRing) -> Option<AudioFrame> {
+    fn drain_ring(ring: &mut AudioRing, pts: &mut PtsTracker) -> Option<AudioFrame> {
         let available = ring.samples.slots();
         if available == 0 {
             return None;
@@ -67,15 +72,15 @@ impl SckCapture {
             samples.push(s);
         }
 
-        // Get the most recent PTS
-        let mut pts_ns: i128 = 0;
-        while let Ok((pts, _len)) = ring.pts.pop() {
-            pts_ns = pts;
+        while let Ok(entry) = ring.pts.pop() {
+            pts.push(entry);
         }
 
         if samples.is_empty() {
             return None;
         }
+
+        let pts_ns = pts.start_pts(samples.len(), SAMPLE_RATE);
 
         Some(AudioFrame {
             pts_ns,
@@ -103,10 +108,94 @@ impl AudioCapture for SckCapture {
     }
 
     fn try_recv_system(&mut self) -> Option<AudioFrame> {
-        Self::drain_ring(&mut self.system_ring)
+        Self::drain_ring(&mut self.system_ring, &mut self.system_pts)
     }
 
     fn try_recv_mic(&mut self) -> Option<AudioFrame> {
-        Self::drain_ring(&mut self.mic_ring)
+        Self::drain_ring(&mut self.mic_ring, &mut self.mic_pts)
+    }
+}
+
+struct PtsTracker {
+    pending: VecDeque<(i128, usize)>,
+    pending_offset: usize,
+    last_pts_ns: i128,
+}
+
+impl PtsTracker {
+    fn new() -> Self {
+        Self {
+            pending: VecDeque::new(),
+            pending_offset: 0,
+            last_pts_ns: 0,
+        }
+    }
+
+    fn push(&mut self, entry: (i128, usize)) {
+        self.last_pts_ns = entry.0;
+        self.pending.push_back(entry);
+    }
+
+    fn start_pts(&mut self, samples: usize, sample_rate: u32) -> i128 {
+        if samples == 0 {
+            return self.last_pts_ns;
+        }
+
+        let mut remaining = samples;
+        let mut start_pts = None;
+
+        while remaining > 0 {
+            let Some((pts, len)) = self.pending.front().copied() else {
+                break;
+            };
+
+            let offset = self.pending_offset.min(len);
+            if start_pts.is_none() {
+                let offset_ns = (offset as i128 * 1_000_000_000) / sample_rate as i128;
+                start_pts = Some(pts + offset_ns);
+            }
+
+            let available = len.saturating_sub(offset);
+            if remaining >= available {
+                remaining -= available;
+                self.pending.pop_front();
+                self.pending_offset = 0;
+            } else {
+                self.pending_offset += remaining;
+                remaining = 0;
+            }
+        }
+
+        start_pts.unwrap_or(self.last_pts_ns)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PtsTracker;
+
+    #[test]
+    fn start_pts_tracks_offsets() {
+        let mut tracker = PtsTracker::new();
+        tracker.push((1_000, 4));
+        tracker.push((2_000, 4));
+
+        let start = tracker.start_pts(2, 4);
+        assert_eq!(start, 1_000);
+
+        let start = tracker.start_pts(4, 4);
+        assert_eq!(start, 1_000 + 500_000_000);
+
+        let start = tracker.start_pts(2, 4);
+        assert_eq!(start, 2_000 + 500_000_000);
+    }
+
+    #[test]
+    fn start_pts_uses_last_when_missing() {
+        let mut tracker = PtsTracker::new();
+        tracker.push((5_000, 2));
+        let _ = tracker.start_pts(2, 4);
+        let start = tracker.start_pts(3, 4);
+        assert_eq!(start, 5_000);
     }
 }
