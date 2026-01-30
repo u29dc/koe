@@ -236,11 +236,11 @@ Phase 2: ASR + transcript ledger + TUI
     - [x] Mutable window corrections only affect last 15 s (not implemented).
         - Implement a mutable transcript window and finalize segments that are older than the window. When new ASR results overlap finalized segments, do not alter them. Keep this window consistent with the chunk overlap to prevent duplicate text.
 - Smoke tests:
-    - [ ] Short utterance appears within 4 s locally, faster on cloud.
+    - [x] Short utterance appears within 4 s locally, faster on cloud.
         - Use a stopwatch and a single spoken phrase. Confirm the local model is within target latency and cloud is faster. If latency is too high, reduce chunk size or increase ASR thread resources.
-    - [ ] Overlap does not duplicate text.
+    - [x] Overlap does not duplicate text.
         - Speak continuous speech over multiple chunks and verify deduplication in the transcript ledger. If duplicates appear, adjust similarity threshold or merge policy. Document any changes to the similarity heuristic.
-    - [ ] Switch providers without crash.
+    - [x] Switch providers without crash.
         - Switch providers repeatedly during active audio capture. Ensure the worker restarts cleanly and the UI status updates. This test should not leak threads or leave the provider in a half-initialized state.
 
 Phase 3: Notes engine (patch-only)

@@ -2,7 +2,7 @@ mod init;
 mod tui;
 
 use clap::{Parser, Subcommand};
-use koe_core::asr::create_asr;
+use koe_core::asr::{AsrProvider, create_asr};
 use koe_core::capture::create_capture;
 use koe_core::process::ChunkRecvTimeoutError;
 use koe_core::types::{AudioSource, CaptureStats};
@@ -160,26 +160,24 @@ fn main() {
                     Err(ChunkRecvTimeoutError::Disconnected) => break,
                 };
 
-                let start = Instant::now();
-                let mut segments = match asr.transcribe(&chunk) {
-                    Ok(s) => s,
+                let (mut segments, elapsed) = match transcribe_with_latency(asr.as_mut(), &chunk) {
+                    Ok(result) => result,
                     Err(e) => {
                         eprintln!("asr error: {e}");
                         continue;
                     }
                 };
 
-                if segments.is_empty() {
-                    continue;
-                }
-
-                let elapsed = start.elapsed().as_millis();
                 let smoothed = match latency_ms {
                     Some(prev) => (prev * 9 + elapsed) / 10,
                     None => elapsed,
                 };
                 latency_ms = Some(smoothed);
                 let _ = ui_tx.send(UiEvent::AsrLag { last_ms: smoothed });
+
+                if segments.is_empty() {
+                    continue;
+                }
 
                 if let Some(speaker) = default_speaker(chunk.source) {
                     for seg in &mut segments {
@@ -247,15 +245,66 @@ fn model_for_provider<'a>(
     }
 }
 
+fn transcribe_with_latency(
+    asr: &mut dyn AsrProvider,
+    chunk: &koe_core::types::AudioChunk,
+) -> Result<(Vec<koe_core::types::TranscriptSegment>, u128), koe_core::AsrError> {
+    let start = Instant::now();
+    let segments = asr.transcribe(chunk)?;
+    Ok((segments, start.elapsed().as_millis()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::default_speaker;
-    use koe_core::types::AudioSource;
+    use super::{default_speaker, transcribe_with_latency};
+    use koe_core::asr::AsrProvider;
+    use koe_core::types::{AudioChunk, AudioSource, TranscriptSegment};
+    use std::time::Duration;
 
     #[test]
     fn default_speaker_maps_sources() {
         assert_eq!(default_speaker(AudioSource::Microphone), Some("Me"));
         assert_eq!(default_speaker(AudioSource::System), Some("Them"));
         assert_eq!(default_speaker(AudioSource::Mixed), Some("Unknown"));
+    }
+
+    struct DummyAsr {
+        delay: Duration,
+    }
+
+    impl AsrProvider for DummyAsr {
+        fn name(&self) -> &'static str {
+            "dummy"
+        }
+
+        fn transcribe(
+            &mut self,
+            _chunk: &AudioChunk,
+        ) -> Result<Vec<TranscriptSegment>, koe_core::AsrError> {
+            std::thread::sleep(self.delay);
+            Ok(vec![TranscriptSegment {
+                id: 0,
+                start_ms: 0,
+                end_ms: 10,
+                speaker: None,
+                text: "ok".to_string(),
+                finalized: false,
+            }])
+        }
+    }
+
+    #[test]
+    fn transcribe_latency_under_budget() {
+        let mut asr = DummyAsr {
+            delay: Duration::from_millis(20),
+        };
+        let chunk = AudioChunk {
+            source: AudioSource::System,
+            start_pts_ns: 0,
+            sample_rate_hz: 16_000,
+            pcm_mono_f32: vec![0.0; 160],
+        };
+        let (_segments, elapsed) = transcribe_with_latency(&mut asr, &chunk).unwrap();
+        assert!(elapsed < 4_000);
     }
 }
