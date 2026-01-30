@@ -89,6 +89,53 @@ impl StreamPipeline {
         self.vad_remainder.drain(..offset);
     }
 
+    #[cfg(test)]
+    fn process_with_speech(
+        &mut self,
+        input_48k: &[f32],
+        pts_ns: i128,
+        chunk_tx: &ChunkSender,
+        stats: &CaptureStats,
+        speech: bool,
+    ) {
+        // Prepend remainder and feed complete chunks to resampler
+        self.resample_remainder.extend_from_slice(input_48k);
+
+        let full_chunks = (self.resample_remainder.len() / RESAMPLE_CHUNK) * RESAMPLE_CHUNK;
+        if full_chunks == 0 {
+            return;
+        }
+
+        let to_resample = &self.resample_remainder[..full_chunks];
+        let resampled = match self.resampler.process(to_resample) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        self.resample_remainder.drain(..full_chunks);
+
+        self.vad_remainder.extend_from_slice(&resampled);
+
+        const VAD_FRAME: usize = 512;
+        let mut offset = 0;
+        while offset + VAD_FRAME <= self.vad_remainder.len() {
+            let frame = &self.vad_remainder[offset..offset + VAD_FRAME];
+
+            if let Some(chunk) = self.chunker.push(frame, pts_ns, speech) {
+                stats.inc_chunks_emitted();
+                match chunk_tx.send_drop_oldest(chunk) {
+                    SendOutcome::Sent => {}
+                    SendOutcome::DroppedOldest => {
+                        stats.inc_chunks_dropped();
+                    }
+                    SendOutcome::Disconnected => return,
+                }
+            }
+
+            offset += VAD_FRAME;
+        }
+        self.vad_remainder.drain(..offset);
+    }
+
     fn flush(&mut self, chunk_tx: &ChunkSender, stats: &CaptureStats) {
         if let Some(chunk) = self.chunker.flush() {
             stats.inc_chunks_emitted();
@@ -170,5 +217,24 @@ impl AudioProcessor {
 impl Drop for AudioProcessor {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RESAMPLE_CHUNK, StreamPipeline, chunk_channel};
+    use crate::types::{AudioSource, CaptureStats};
+
+    #[test]
+    fn system_audio_increments_chunk_counters() {
+        let mut pipeline = StreamPipeline::new(AudioSource::System).unwrap();
+        let stats = CaptureStats::new();
+        let (chunk_tx, _chunk_rx) = chunk_channel(4);
+
+        let input = vec![0.1f32; RESAMPLE_CHUNK * 700];
+        pipeline.process_with_speech(&input, 0, &chunk_tx, &stats, true);
+
+        assert!(stats.chunks_emitted() > 0);
+        assert_eq!(stats.chunks_dropped(), 0);
     }
 }

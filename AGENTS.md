@@ -205,7 +205,7 @@ Phase 1: Audio capture + chunking
     - [x] PTS alignment is accurate for drained batches.
         - `drain_ring` currently uses the most recent PTS for all samples; instead, track PTS per buffer and compute start PTS for the batch. A safe approach is to record `(pts, len)` for each callback and derive a running start offset. Validate timestamps by comparing against known audio markers.
 - Smoke tests:
-    - [ ] Play system audio and see chunk counters increase.
+    - [x] Play system audio and see chunk counters increase.
         - Use a short audio clip and verify both frame and chunk counters increment. Confirm that system audio shows up only in the system pipeline and not the mic stream. This should be repeatable without restarting the process.
     - [ ] Speak into mic and see separate stream counters increase.
         - Verify mic data flows end-to-end by checking `try_recv_mic` returns frames and the mic pipeline emits chunks. If mic remains silent, re-check output handler registration and permissions. Keep system audio silent while testing mic to avoid cross-talk.
