@@ -1,0 +1,23 @@
+.gitattributes
+  f9c14e1dbef08f58 1-2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.40",
+  "base_commit_sha": "c70a6de3a9d467b068aeb9caad128468bb268ce0",
+  "prompts": {
+    "f9c14e1dbef08f58": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "027d939b-e1a9-4016-a42f-2bca019388a2",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 2,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    }
+  }
+}
