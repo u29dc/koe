@@ -9,6 +9,7 @@ pub(crate) fn build_prompt(
 ) -> String {
     let transcript = recent
         .iter()
+        .filter(|s| s.finalized)
         .map(|s| format!("[{}-{}] {}", s.start_ms, s.end_ms, s.text.trim()))
         .collect::<Vec<_>>()
         .join("\n");
@@ -133,6 +134,13 @@ mod tests {
         }
     }
 
+    fn seg_unfinalized(id: u64, text: &str) -> TranscriptSegment {
+        TranscriptSegment {
+            finalized: false,
+            ..seg(id, text)
+        }
+    }
+
     #[test]
     fn extract_json_object_finds_bounds() {
         let input = "prefix {\"ops\": []} suffix";
@@ -168,5 +176,16 @@ mod tests {
         );
         assert!(prompt.contains("Context:"));
         assert!(prompt.contains("team sync"));
+    }
+
+    #[test]
+    fn build_prompt_uses_finalized_only() {
+        let prompt = build_prompt(
+            &[seg(1, "keep"), seg_unfinalized(2, "drop")],
+            &MeetingState::default(),
+            None,
+        );
+        assert!(prompt.contains("keep"));
+        assert!(!prompt.contains("drop"));
     }
 }
