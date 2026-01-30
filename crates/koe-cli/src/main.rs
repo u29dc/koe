@@ -9,7 +9,7 @@ use config::{Config, ConfigPaths};
 use koe_core::asr::{AsrProvider, create_asr};
 use koe_core::capture::create_capture;
 use koe_core::process::ChunkRecvTimeoutError;
-use koe_core::types::{AudioSource, CaptureStats};
+use koe_core::types::{AudioSource, CaptureStats, NotesPatch};
 use session::SessionHandle;
 use std::sync::mpsc;
 use std::thread;
@@ -199,6 +199,7 @@ fn main() {
         }
     };
     let (ui_tx, ui_rx) = mpsc::channel();
+    let _ = ui_tx.send(UiEvent::NotesPatch(NotesPatch { ops: Vec::new() }));
     let (asr_cmd_tx, asr_cmd_rx) = mpsc::channel();
 
     let asr_thread = match thread::Builder::new()
