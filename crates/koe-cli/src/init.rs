@@ -58,6 +58,7 @@ pub fn run(args: &InitArgs, paths: &ConfigPaths) -> Result<(), InitError> {
     let mut changed = Vec::new();
     let mut kept = Vec::new();
 
+    let prior_asr_provider = config.asr.provider.clone();
     let current_asr_provider = if args.force {
         ""
     } else {
@@ -74,7 +75,7 @@ pub fn run(args: &InitArgs, paths: &ConfigPaths) -> Result<(), InitError> {
     );
 
     if config.asr.provider == "whisper" {
-        let current_model = if args.force {
+        let current_model = if args.force || prior_asr_provider != "whisper" {
             None
         } else {
             current_whisper_model_name(config.asr.model.as_str())
@@ -91,7 +92,7 @@ pub fn run(args: &InitArgs, paths: &ConfigPaths) -> Result<(), InitError> {
             args.force,
         );
     } else {
-        let current_groq_model = if !args.force && config.asr.provider == "groq" {
+        let current_groq_model = if !args.force && prior_asr_provider == "groq" {
             config.asr.model.as_str()
         } else {
             ""
@@ -116,6 +117,7 @@ pub fn run(args: &InitArgs, paths: &ConfigPaths) -> Result<(), InitError> {
         );
     }
 
+    let prior_summarizer_provider = config.summarizer.provider.clone();
     let current_summarizer_provider = if args.force {
         ""
     } else {
@@ -136,7 +138,7 @@ pub fn run(args: &InitArgs, paths: &ConfigPaths) -> Result<(), InitError> {
     );
 
     if config.summarizer.provider == "ollama" {
-        let current_model = if !args.force && config.summarizer.provider == "ollama" {
+        let current_model = if !args.force && prior_summarizer_provider == "ollama" {
             config.summarizer.model.as_str()
         } else {
             ""
@@ -151,7 +153,7 @@ pub fn run(args: &InitArgs, paths: &ConfigPaths) -> Result<(), InitError> {
             args.force,
         );
     } else {
-        let current_model = if !args.force && config.summarizer.provider == "openrouter" {
+        let current_model = if !args.force && prior_summarizer_provider == "openrouter" {
             config.summarizer.model.as_str()
         } else {
             ""
