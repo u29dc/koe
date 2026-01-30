@@ -260,7 +260,7 @@ Phase 2: ASR + transcript ledger + TUI
     - [x] Color system: other-party content uses a restrained blue, self content uses neutral gray, headings are subtle and consistent.
         - Apply colors consistently in both transcript and notes; blue is reserved for “Them” content, gray for “Me,” and neutral for headings/metadata.
         - Keep palette minimal and readable; avoid bright or noisy styling. Ensure colors remain legible in common terminal themes.
-    - [ ] TUI clean shutdown restores terminal even on panic.
+    - [x] TUI clean shutdown restores terminal even on panic.
         - Maintain existing panic hook and ensure all threads stop cleanly on exit.
     - [ ] Meeting context can be provided via CLI, config, or TUI and is passed to the summarizer.
         - Support `--context`, config default (`session.context`), and an in-TUI edit action; pick a single canonical source with clear precedence (CLI > TUI > config).

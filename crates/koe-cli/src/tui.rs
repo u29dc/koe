@@ -51,8 +51,33 @@ impl UiTheme {
     }
 }
 
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+        let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen);
+    }
+}
+
+struct ProcessorGuard(Option<AudioProcessor>);
+
+impl ProcessorGuard {
+    fn new(processor: AudioProcessor) -> Self {
+        Self(Some(processor))
+    }
+}
+
+impl Drop for ProcessorGuard {
+    fn drop(&mut self) {
+        if let Some(mut processor) = self.0.take() {
+            processor.stop();
+        }
+    }
+}
+
 pub fn run(
-    mut processor: AudioProcessor,
+    processor: AudioProcessor,
     ui_rx: Receiver<UiEvent>,
     stats: CaptureStats,
     asr_name: String,
@@ -62,6 +87,8 @@ pub fn run(
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
     crossterm::execute!(stdout, EnterAlternateScreen)?;
+    let _terminal_guard = TerminalGuard;
+    let _processor_guard = ProcessorGuard::new(processor);
 
     // Panic hook to restore terminal on panic
     let original_hook = std::panic::take_hook();
@@ -195,9 +222,6 @@ pub fn run(
         }
     }
 
-    processor.stop();
-    terminal::disable_raw_mode()?;
-    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     Ok(())
 }
 
