@@ -183,9 +183,27 @@ Phase 0: Quality gate wiring
         - Maintain formatting rules here rather than inline editor settings so that `cargo fmt` is deterministic. If style changes are needed, document them in the plan or a style note. Ensure formatting does not fight the default Rust edition settings.
     - [x] rustfmt and clippy are installed (`rustup component add rustfmt clippy`) (verified via `cargo fmt --version` and `cargo clippy --version`).
         - These are required for `util:format` and `util:lint` to run in a clean environment. Verify by running `rustup component list --installed` or by executing the scripts. If this project is used in CI, make sure the CI image installs these components too.
+    - [ ] Config file lives at `~/.koe/config.toml` with a minimal schema (audio, asr, summarizer, ui) and defaults for local-first.
+        - Required sections: `[audio]` (sample_rate, channels, sources), `[asr]` (provider, model, api_key), `[summarizer]` (provider, model, api_key, prompt_profile), `[ui]` (show_transcript, notes_only_default, color_theme).
+        - Keep all user-facing settings here, including API keys, model choices, and UI toggles. Environment variables may override for CI/dev but are optional for end users.
+        - Ensure `~/.koe/` contains `config.toml`, `models/`, and `sessions/` directories with predictable paths.
+        - Ensure config file permissions are restricted (0600); warn if file is group/world readable.
+        - Add a config version field and lightweight migration path for new fields.
+        - Define a single runtime entry point: `koe` runs the TUI; `koe init` and `koe config` handle setup. Avoid introducing additional top-level commands unless required.
+    - [ ] `koe config` subcommand reads/writes config with validation and redacts secrets in terminal output.
+        - Support `--print` (redact keys), `--set key=value` (dotted paths like `asr.provider=whisper`), and `--edit` (opens in $EDITOR) for quick changes.
+        - Validate enums (provider names), file paths, and required keys; surface errors with actionable guidance.
+        - Define precedence: CLI flags > config file > env vars (env vars optional), and keep precedence consistent across commands.
+    - [ ] `koe init` runs interactive onboarding (local or cloud, model selection, API keys) and persists to config.
+        - Prompt order: permissions guidance, ASR choice (local/cloud), model selection or download, summarizer choice (local/cloud), model selection, API key entry; write config and report the next command to run.
+        - When local ASR is selected, offer model download options and show disk size; when cloud is selected, prompt for API key and validate non-empty input.
+    - [ ] `koe init` prints macOS permission instructions for Screen Recording + Microphone and notes restart requirements.
+        - Keep output minimal and actionable, include the exact System Settings path, mention that permissions may require a restart, and show a single-line checklist of required grants.
 - Smoke tests:
     - [x] `bun run util:check` completes (not executed).
         - Run this once after any major change to confirm the full gate is healthy. If it fails, address the earliest failing step first to avoid cascading errors. Capture the output in CI logs for later debugging.
+    - [ ] `koe init` writes `~/.koe/config.toml` and can be re-run idempotently without clobbering user edits.
+        - Re-running init should preserve existing values unless explicitly changed or `--force` is set; report what changed and what was kept.
 
 Phase 1: Audio capture + chunking
 
@@ -235,6 +253,20 @@ Phase 2: ASR + transcript ledger + TUI
         - Track time spent per chunk in the ASR worker and emit rolling latency metrics. Display the active provider and last latency in the status bar alongside capture stats. This is essential for troubleshooting local vs cloud performance.
     - [x] Mutable window corrections only affect last 15 s (not implemented).
         - Implement a mutable transcript window and finalize segments that are older than the window. When new ASR results overlap finalized segments, do not alter them. Keep this window consistent with the chunk overlap to prevent duplicate text.
+    - [ ] Minimal full-screen TUI with a focused notes pane and optional transcript pane.
+        - Default view is notes-only; toggle transcript visibility with a single key (e.g., `t`). When visible, show transcript on one side and notes on the other with stable layout and no flicker.
+        - Provide a clear status line with provider/lag/capture stats, and keep layout stable when toggling panes (no shifting widths).
+        - Document key bindings in a single place (help overlay or footer) and keep them consistent: quit, toggle transcript, switch provider, set context.
+    - [ ] Color system: other-party content uses a restrained blue, self content uses neutral gray, headings are subtle and consistent.
+        - Apply colors consistently in both transcript and notes; blue is reserved for “Them” content, gray for “Me,” and neutral for headings/metadata.
+        - Keep palette minimal and readable; avoid bright or noisy styling. Ensure colors remain legible in common terminal themes.
+    - [ ] TUI clean shutdown restores terminal even on panic.
+        - Maintain existing panic hook and ensure all threads stop cleanly on exit.
+    - [ ] Meeting context can be provided via CLI, config, or TUI and is passed to the summarizer.
+        - Support `--context`, config default (`session.context`), and an in-TUI edit action; pick a single canonical source with clear precedence (CLI > TUI > config).
+        - Context should be stored in session metadata (`metadata.toml`) and injected into summarizer prompts; allow empty/absent context.
+        - Support multi-line context; preserve verbatim and redact from logs unless explicitly printed.
+        - TUI context edits update the current session metadata only (do not mutate global config).
 - Smoke tests:
     - [x] Short utterance appears within 4 s locally, faster on cloud.
         - Use a stopwatch and a single spoken phrase. Confirm the local model is within target latency and cloud is faster. If latency is too high, reduce chunk size or increase ASR thread resources.
@@ -242,6 +274,8 @@ Phase 2: ASR + transcript ledger + TUI
         - Speak continuous speech over multiple chunks and verify deduplication in the transcript ledger. If duplicates appear, adjust similarity threshold or merge policy. Document any changes to the similarity heuristic.
     - [x] Switch providers without crash.
         - Switch providers repeatedly during active audio capture. Ensure the worker restarts cleanly and the UI status updates. This test should not leak threads or leave the provider in a half-initialized state.
+    - [ ] Toggle transcript pane repeatedly without layout glitches.
+        - Verify the notes pane remains stable and the transcript pane cleanly hides/shows without resizing artifacts.
 
 Phase 3: Notes engine (patch-only)
 
@@ -251,11 +285,21 @@ Phase 3: Notes engine (patch-only)
     - [x] OpenRouter provider emits NotesPatch.
         - Add a second provider with similar patch parsing, but with OpenRouter-specific authentication. Validate response shape and ensure timeouts and retries are consistent with Groq. The provider should be swappable at runtime like ASR.
     - [ ] Notes pane updates without full rewrites.
-        - Apply patches to a persistent `MeetingState` so only incremental updates are rendered. Avoid full re-render of notes to keep the UI stable and reduce flicker. Ensure patches only add or update, never delete silently.
+        - Apply patches to a persistent `MeetingState` and only update changed items in the TUI; avoid full redraws to keep scrolling stable. Patches should only add/update, never delete silently.
     - [ ] Stable IDs persist across updates.
         - IDs should be generated by the summarizer and reused across updates, not regenerated on each patch. This allows UI selection and references to remain stable. Validate by running multiple summaries and confirming IDs remain unchanged for the same item.
     - [ ] Summarizer uses finalized segments only.
         - Feed only `finalized` transcript segments into the summarizer to avoid churn. If you want provisional notes, mark them clearly and separate them from stable notes. This protects against edits to earlier transcript text.
+    - [ ] Summarizer prompts are tuned for minimal, information-dense output with short patches.
+        - Output must be concise, avoid filler, and emit only key points/actions/decisions. Prefer short noun phrases over full sentences.
+    - [ ] Notes capture speaker attribution when available (Me vs Them) with consistent labels.
+        - Use stable labels (“Me”, “Them”) and keep the label prefix minimal (e.g., `Me:`) so notes stay compact.
+    - [ ] Notes pane updates incrementally in real time without full redraws.
+        - Patch application updates the data model and the UI only re-renders the visible notes list; maintain ordering and avoid flicker.
+    - [ ] OpenRouter role infrastructure uses a stable system prompt and config-driven model selection.
+        - System prompt must enforce patch-only JSON output and concise summaries; model and API key come from config, not env vars.
+    - [ ] Summarizer prompt includes optional meeting context and preferred participant names.
+        - Inject context ahead of transcript; if context is empty, omit the section entirely to avoid noise.
 - Smoke tests:
     - [ ] Decision phrasing triggers new decision item.
         - Use test phrases that match the summarizer prompt and confirm a new decision appears. Check that it references the correct transcript evidence IDs. Verify that repeated phrases do not create duplicates.
@@ -269,11 +313,30 @@ Phase 4: Latency comparison + polish
 - Done criteria:
     - [ ] Status bar shows ASR lag, drops, and provider.
         - Extend the status bar to include ASR latency, active provider, and capture drop metrics. Keep the layout fixed width to avoid jitter as values change. This should be updated from the same event stream as transcript updates.
+    - [ ] Sessions are persisted under `~/.koe/sessions/{uuidv7}/` with rolling checkpoints.
+        - Create a new session directory at start with `metadata.toml` (or JSON) containing: id, start_time, end_time (nullable), finalized flag, asr/summarizer providers, model names, file names.
+        - Keep schema extensible for future fields: title, description, participants, tags; do not require them yet.
+        - Use UUIDv7 for session id and include it in filenames and metadata for easy correlation.
+        - Canonical formats: `metadata.toml` (single-record), `transcript.jsonl` (append-only segments), `notes.json` (state snapshot), `context.txt` (verbatim optional), `audio.raw` (crash-safe stream).
+        - Derived exports: `audio.wav`, `transcript.md`, `notes.md` written on finalize or explicit export; do not treat markdown as canonical.
+        - Metadata schema (TOML): id (uuidv7), start_time (RFC3339), end_time (RFC3339 or null), finalized (bool), context_file, audio_raw_file, audio_wav_file, transcript_file, notes_file, asr_provider, asr_model, summarizer_provider, summarizer_model.
+        - Transcript JSONL schema: `{id, start_ms, end_ms, speaker, text, finalized, source}`; append per segment, keep one JSON object per line.
+        - Notes JSON schema: full `MeetingState` snapshot with key_points/actions/decisions; include `updated_at` timestamp for snapshots.
+        - Audio raw format: PCM f32 little-endian, 48 kHz, mono, interleaved; record exact format in metadata for WAV finalization.
+    - [ ] Audio, transcript, and notes are continuously written during the session.
+        - Persist audio from local capture even when cloud ASR is used. Write `audio.raw` continuously with periodic flush, and finalize to `audio.wav` on clean shutdown; maintain a transcript append file (e.g., `transcript.jsonl`) and a notes snapshot (`notes.json`).
+        - Use atomic write patterns for metadata and notes snapshots (write temp + rename) to survive crashes.
+        - Define checkpoint interval (e.g., every 5–10 s) and ensure partial data is still readable on crash.
+        - Rationale: JSONL for append-only streams (transcript, optional patch log), JSON/TOML for single-record snapshots (metadata/notes), Markdown only for human export.
+    - [ ] Crash-safe recovery: partial sessions can be reopened and exported.
+        - Ensure incomplete sessions still have usable transcript/notes; metadata should include `finalized=false` and last_update timestamp for recovery tooling.
     - [ ] Export transcript/notes on quit.
         - On shutdown, persist the transcript and notes to files (e.g., `transcript.md`, `notes.json`). Ensure the export path is configurable and errors are surfaced cleanly. Do not block UI shutdown indefinitely; use a bounded export timeout.
 - Smoke tests:
     - [ ] Compare local vs cloud latency over a 3-minute session.
         - Run a controlled session with both providers and record average latency. Use the status bar metrics to compare and document the result. If results vary, capture network conditions for context.
+    - [ ] Kill the process mid-session and confirm recovery files exist.
+        - Verify audio, transcript, notes, and metadata are present and readable, with `finalized=false`.
     - [ ] Export produces valid transcript.md and notes.json.
         - Validate the output format with a simple parser or quick manual check. Ensure files include metadata like timestamps or session ID if desired. Confirm the export does not include partial or duplicated entries.
 
