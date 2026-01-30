@@ -22,7 +22,7 @@ koe/
 
 | Layer            | Choice                                         | Notes                                |
 | ---------------- | ---------------------------------------------- | ------------------------------------ |
-| Language         | Rust 2024 edition                              | rust-version 1.85                    |
+| Language         | Rust 2024 edition                              | rust-version 1.93.0                  |
 | Audio capture    | screencapturekit 1.5.0                         | macOS 15+, system audio + mic        |
 | Ring buffer      | rtrb 0.3.2                                     | lock-free SPSC for RT callbacks      |
 | Resampling       | rubato 0.16.2                                  | 48k -> 16k high-quality              |
@@ -212,6 +212,8 @@ Phase 1: Audio capture + chunking
         - Confirm the stream is configured with `captures_audio=true` and a content filter that actually yields audio callbacks. The output handler should be registered on `SCStreamOutputType::Audio` and should be receiving buffers. Watch for errors at `start_capture()` for permission or display availability issues.
     - [x] Microphone callbacks fire (`crates/koe-core/src/capture/sck.rs:49`).
         - Register the output handler for `SCStreamOutputType::Microphone` in addition to Audio. Ensure the handler routes microphone buffers into the mic ring buffer and that the mic ring is drained in `try_recv_mic`. Validate by speaking and watching mic counters increase separately from system audio.
+    - [x] Default microphone selection prefers built-in mic when config is unset.
+        - If `audio.microphone_device_id` is empty and microphone capture is enabled, choose the built-in mic (id `BuiltInMicrophoneDevice` or name containing "built-in"/"macbook") and fall back to the OS default input when no built-in is present. Avoid Bluetooth headset mic becoming the implicit default unless explicitly configured.
     - [x] Audio processor emits VAD-gated chunks with overlap (`crates/koe-core/src/process/mod.rs`, `crates/koe-core/src/process/chunker.rs`).
         - The processor should read from the capture rings, resample to 16 kHz, run VAD, and feed the chunker with the correct sample rate. Confirm the overlap behavior by inspecting chunk sizes around the target and max sizes. Maintain the 2s/4s/6s/1s policy to keep downstream ASR costs predictable.
     - [x] Drop metrics visible in status (frame drops not wired; handler drop count not surfaced).
