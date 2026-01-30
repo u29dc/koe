@@ -246,7 +246,7 @@ Phase 2: ASR + transcript ledger + TUI
 Phase 3: Notes engine (patch-only)
 
 - Done criteria:
-    - [ ] Ollama provider emits NotesPatch.
+    - [x] Ollama provider emits NotesPatch.
         - Implement a summarizer provider that calls Ollama and parses a patch-only response. Keep the prompt and response schema stable to avoid parse failures. Treat network errors as non-fatal and try again on the next cycle.
     - [ ] OpenRouter provider emits NotesPatch.
         - Add a second provider with similar patch parsing, but with OpenRouter-specific authentication. Validate response shape and ensure timeouts and retries are consistent with Groq. The provider should be swappable at runtime like ASR.
