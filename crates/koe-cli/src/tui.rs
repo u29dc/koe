@@ -27,6 +27,14 @@ pub enum TranscribeCommand {
     ToggleMode,
 }
 
+#[derive(Debug, Clone)]
+pub enum SummarizeCommand {
+    ToggleMode,
+    Force,
+    Reset,
+    UpdateContext(String),
+}
+
 pub enum UiEvent {
     Transcript(Vec<TranscriptSegment>),
     NotesPatch(NotesPatch),
@@ -34,6 +42,10 @@ pub enum UiEvent {
         mode: String,
         provider: String,
         connected: bool,
+    },
+    SummarizeStatus {
+        mode: String,
+        provider: String,
     },
     TranscribeLag {
         last_ms: u128,
@@ -83,14 +95,6 @@ impl ModeProfiles {
         }
     }
 
-    fn switch_mode(&mut self) {
-        self.active = if self.active == "cloud" {
-            "local".to_string()
-        } else {
-            "cloud".to_string()
-        };
-    }
-
     fn set_provider(&mut self, mode: &str, provider: String) {
         self.profile_for_mode_mut(mode).provider = provider;
     }
@@ -101,6 +105,7 @@ pub struct TuiContext {
     pub ui_rx: Receiver<UiEvent>,
     pub stats: CaptureStats,
     pub transcribe_cmd_tx: Sender<TranscribeCommand>,
+    pub summarize_cmd_tx: Sender<SummarizeCommand>,
     pub ui_config: UiConfig,
     pub session_factory: SessionFactory,
     pub shared_writer: SharedRawAudioWriter,
@@ -349,6 +354,18 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                Ok(UiEvent::SummarizeStatus { mode, provider }) => {
+                    summarize_profiles.active = mode.clone();
+                    summarize_profiles.set_provider(&mode, provider);
+                    if let Some(active_session) = session.as_mut() {
+                        let profile = summarize_profiles.active_profile();
+                        if let Err(err) = active_session
+                            .update_summarize(profile.provider.clone(), profile.model.clone())
+                        {
+                            eprintln!("session summarize update failed: {err}");
+                        }
+                    }
+                }
                 Ok(UiEvent::TranscribeLag { last_ms }) => {
                     transcribe_lag_ms = Some(last_ms);
                 }
@@ -485,6 +502,11 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                             phase = MeetingPhase::MeetingActive;
                                             capture_paused = false;
                                             processor.resume();
+                                            let _ =
+                                                ctx.summarize_cmd_tx.send(SummarizeCommand::Reset);
+                                            let _ = ctx.summarize_cmd_tx.send(
+                                                SummarizeCommand::UpdateContext(context.clone()),
+                                            );
                                         }
                                     }
                                     PaletteCommandId::EndMeeting => {
@@ -515,23 +537,17 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                         processor.resume();
                                         capture_paused = false;
                                     }
-                                    PaletteCommandId::ForceSummarize => {}
+                                    PaletteCommandId::ForceSummarize => {
+                                        let _ = ctx.summarize_cmd_tx.send(SummarizeCommand::Force);
+                                    }
                                     PaletteCommandId::SwitchTranscribeMode => {
                                         let _ = ctx
                                             .transcribe_cmd_tx
                                             .send(TranscribeCommand::ToggleMode);
                                     }
                                     PaletteCommandId::SwitchSummarizeMode => {
-                                        summarize_profiles.switch_mode();
-                                        if let Some(active_session) = session.as_mut() {
-                                            let profile = summarize_profiles.active_profile();
-                                            if let Err(err) = active_session.update_summarize(
-                                                profile.provider.clone(),
-                                                profile.model.clone(),
-                                            ) {
-                                                eprintln!("session summarize update failed: {err}");
-                                            }
-                                        }
+                                        let _ =
+                                            ctx.summarize_cmd_tx.send(SummarizeCommand::ToggleMode);
                                     }
                                     PaletteCommandId::SetTranscribeModel => {
                                         let buffer =
@@ -645,6 +661,8 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                         processor.pause();
                                         ctx.shared_writer.set(None);
 
+                                        let _ = ctx.summarize_cmd_tx.send(SummarizeCommand::Reset);
+
                                         let start_input = StartMeetingInput {
                                             factory: &ctx.session_factory,
                                             shared_writer: &ctx.shared_writer,
@@ -667,6 +685,9 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                             phase = MeetingPhase::MeetingActive;
                                             capture_paused = false;
                                             processor.resume();
+                                            let _ = ctx.summarize_cmd_tx.send(
+                                                SummarizeCommand::UpdateContext(context.clone()),
+                                            );
                                         }
                                     }
                                 }
@@ -692,6 +713,9 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                             eprintln!("context update failed: {err}");
                                         }
                                     }
+                                    let _ = ctx
+                                        .summarize_cmd_tx
+                                        .send(SummarizeCommand::UpdateContext(context.clone()));
                                 }
                                 TextInputKind::TranscribeModel => {
                                     transcribe_profiles.active_profile_mut().model =

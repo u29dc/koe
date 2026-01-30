@@ -9,15 +9,20 @@ use clap::{Parser, Subcommand};
 use config::{Config, ConfigPaths, ProviderConfig};
 use koe_core::capture::{CaptureConfig, create_capture, list_audio_inputs};
 use koe_core::process::ChunkRecvTimeoutError;
+use koe_core::summarize::create_summarize_provider;
 use koe_core::transcribe::{TranscribeProvider, create_transcribe_provider};
-use koe_core::types::{AudioSource, CaptureStats, NotesPatch};
+use koe_core::transcript::TranscriptLedger;
+use koe_core::types::{
+    ActionItem, AudioSource, CaptureStats, MeetingState, NoteItem, NotesOp, NotesPatch,
+    SummarizeEvent,
+};
 use raw_audio::SharedRawAudioWriter;
 use session::SessionFactory;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tui::{TranscribeCommand, UiEvent};
+use tui::{SummarizeCommand, TranscribeCommand, UiEvent};
 
 #[derive(Parser)]
 #[command(name = "koe", version, about = "meeting transcription engine")]
@@ -357,7 +362,170 @@ fn main() {
     let (ui_tx, ui_rx) = mpsc::channel();
     let _ = ui_tx.send(UiEvent::NotesPatch(NotesPatch { ops: Vec::new() }));
     let (transcribe_cmd_tx, transcribe_cmd_rx) = mpsc::channel();
+    let (summarize_cmd_tx, summarize_cmd_rx) = mpsc::channel();
+    let (summarize_tx_transcribe, summarize_rx) = mpsc::channel();
+    let ui_tx_summarize = ui_tx.clone();
+    let ui_tx_transcribe = ui_tx.clone();
     let mut transcribe_profiles_runtime = run.transcribe_profiles.clone();
+    let mut summarize_profiles_runtime = run.summarize_profiles.clone();
+    let summarize_context = run.context.clone().unwrap_or_default();
+    let summarize_participants = run.participants.clone();
+
+    let summarize_thread =
+        match thread::Builder::new()
+            .name("koe-summarize".into())
+            .spawn(move || {
+                const SUMMARIZE_INTERVAL: Duration = Duration::from_secs(10);
+                const SUMMARY_WINDOW_SEGMENTS: usize = 120;
+
+                let mut current_mode = summarize_profiles_runtime.active.clone();
+                let mut context = summarize_context;
+                let participants = summarize_participants;
+                let mut ledger = TranscriptLedger::new();
+                let mut meeting_state = MeetingState::default();
+                let mut last_summary_at = Instant::now() - SUMMARIZE_INTERVAL;
+                let mut last_finalized_id: Option<u64> = None;
+                let mut force_summary = false;
+
+                let send_status = |mode: String, provider: String| {
+                    let _ = ui_tx_summarize.send(UiEvent::SummarizeStatus { mode, provider });
+                };
+
+                let mut summarize =
+                    match create_summarize_for_mode(&summarize_profiles_runtime, &current_mode) {
+                        Ok(provider) => {
+                            let profile = summarize_profiles_runtime.active_profile();
+                            send_status(current_mode.clone(), profile.provider.clone());
+                            Some(provider)
+                        }
+                        Err(e) => {
+                            eprintln!("summarize init failed: {e}");
+                            let profile = summarize_profiles_runtime.active_profile();
+                            send_status(current_mode.clone(), profile.provider.clone());
+                            None
+                        }
+                    };
+
+                loop {
+                    while let Ok(cmd) = summarize_cmd_rx.try_recv() {
+                        match cmd {
+                            SummarizeCommand::ToggleMode => {
+                                let next_mode = if current_mode == "cloud" {
+                                    "local"
+                                } else {
+                                    "cloud"
+                                };
+                                match create_summarize_for_mode(
+                                    &summarize_profiles_runtime,
+                                    next_mode,
+                                ) {
+                                    Ok(provider) => {
+                                        summarize = Some(provider);
+                                        current_mode = next_mode.to_string();
+                                        summarize_profiles_runtime.active = current_mode.clone();
+                                        let profile = summarize_profiles_runtime.active_profile();
+                                        send_status(current_mode.clone(), profile.provider.clone());
+                                    }
+                                    Err(e) => {
+                                        eprintln!("summarize switch failed: {e}");
+                                        let profile = summarize_profiles_runtime.active_profile();
+                                        send_status(current_mode.clone(), profile.provider.clone());
+                                    }
+                                }
+                            }
+                            SummarizeCommand::Force => {
+                                force_summary = true;
+                            }
+                            SummarizeCommand::Reset => {
+                                ledger = TranscriptLedger::new();
+                                meeting_state = MeetingState::default();
+                                last_finalized_id = None;
+                                last_summary_at = Instant::now() - SUMMARIZE_INTERVAL;
+                                force_summary = false;
+                            }
+                            SummarizeCommand::UpdateContext(value) => {
+                                context = value;
+                            }
+                        }
+                    }
+
+                    match summarize_rx.recv_timeout(Duration::from_millis(200)) {
+                        Ok(segments) => {
+                            ledger.append(segments);
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+
+                    let newest_finalized = latest_finalized_id(&ledger);
+                    let has_new_finalized = match (last_finalized_id, newest_finalized) {
+                        (Some(last), Some(current)) => current > last,
+                        (None, Some(_)) => true,
+                        _ => false,
+                    };
+                    let due = Instant::now().duration_since(last_summary_at) >= SUMMARIZE_INTERVAL;
+
+                    if !(force_summary || (has_new_finalized && due)) {
+                        continue;
+                    }
+
+                    let Some(provider) = summarize.as_mut() else {
+                        force_summary = false;
+                        last_summary_at = Instant::now();
+                        continue;
+                    };
+
+                    let recent = ledger.last_n_segments(SUMMARY_WINDOW_SEGMENTS);
+                    if !recent.iter().any(|seg| seg.finalized) {
+                        force_summary = false;
+                        continue;
+                    }
+
+                    let mut patch_ready: Option<NotesPatch> = None;
+                    let context_ref = if context.trim().is_empty() {
+                        None
+                    } else {
+                        Some(context.as_str())
+                    };
+
+                    let result = provider.summarize(
+                        recent,
+                        &meeting_state,
+                        context_ref,
+                        &participants,
+                        &mut |event| match event {
+                            SummarizeEvent::DraftToken(_) => {}
+                            SummarizeEvent::PatchReady(patch) => {
+                                patch_ready = Some(patch);
+                            }
+                        },
+                    );
+
+                    match result {
+                        Ok(()) => {
+                            last_summary_at = Instant::now();
+                            if let Some(patch) = patch_ready {
+                                apply_notes_patch_state(&mut meeting_state, patch.clone());
+                                let _ = ui_tx_summarize.send(UiEvent::NotesPatch(patch));
+                            }
+                            if newest_finalized.is_some() {
+                                last_finalized_id = newest_finalized;
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("summarize error: {e}");
+                            last_summary_at = Instant::now();
+                        }
+                    }
+                    force_summary = false;
+                }
+            }) {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                eprintln!("summarize thread spawn failed: {e}");
+                None
+            }
+        };
 
     let transcribe_thread =
         match thread::Builder::new()
@@ -367,7 +535,7 @@ fn main() {
                 let models_dir = models_dir.clone();
 
                 let send_status = |mode: String, provider: String, connected: bool| {
-                    let _ = ui_tx.send(UiEvent::TranscribeStatus {
+                    let _ = ui_tx_transcribe.send(UiEvent::TranscribeStatus {
                         mode,
                         provider,
                         connected,
@@ -457,7 +625,7 @@ fn main() {
                         None => elapsed,
                     };
                     latency_ms = Some(smoothed);
-                    let _ = ui_tx.send(UiEvent::TranscribeLag { last_ms: smoothed });
+                    let _ = ui_tx_transcribe.send(UiEvent::TranscribeLag { last_ms: smoothed });
 
                     if segments.is_empty() {
                         continue;
@@ -471,7 +639,12 @@ fn main() {
                         }
                     }
 
-                    if ui_tx.send(UiEvent::Transcript(segments)).is_err() {
+                    let _ = summarize_tx_transcribe.send(segments.clone());
+
+                    if ui_tx_transcribe
+                        .send(UiEvent::Transcript(segments))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -496,6 +669,7 @@ fn main() {
         ui_rx,
         stats: stats_display,
         transcribe_cmd_tx,
+        summarize_cmd_tx,
         ui_config: config.ui.clone(),
         session_factory,
         shared_writer,
@@ -511,6 +685,9 @@ fn main() {
     }
 
     if let Some(handle) = transcribe_thread {
+        let _ = handle.join();
+    }
+    if let Some(handle) = summarize_thread {
         let _ = handle.join();
     }
 }
@@ -612,6 +789,124 @@ fn transcribe_with_latency(
     let start = Instant::now();
     let segments = transcribe.transcribe(chunk)?;
     Ok((segments, start.elapsed().as_millis()))
+}
+
+fn create_summarize_for_mode(
+    profiles: &RuntimeProfiles,
+    mode: &str,
+) -> Result<Box<dyn koe_core::summarize::SummarizeProvider>, koe_core::SummarizeError> {
+    let profile = profiles.profile_for_mode(mode);
+    create_summarize_provider(
+        profile.provider.as_str(),
+        Some(profile.model.as_str()),
+        non_empty_str(profile.api_key.as_str()),
+    )
+}
+
+fn latest_finalized_id(ledger: &TranscriptLedger) -> Option<u64> {
+    ledger
+        .segments()
+        .iter()
+        .filter(|segment| segment.finalized)
+        .map(|segment| segment.id)
+        .max()
+}
+
+fn apply_notes_patch_state(state: &mut MeetingState, patch: NotesPatch) -> bool {
+    let mut changed = false;
+
+    for op in patch.ops {
+        match op {
+            NotesOp::AddKeyPoint { id, text, evidence } => {
+                changed |= upsert_note(&mut state.key_points, id, text, evidence);
+            }
+            NotesOp::AddDecision { id, text, evidence } => {
+                changed |= upsert_note(&mut state.decisions, id, text, evidence);
+            }
+            NotesOp::AddAction {
+                id,
+                text,
+                owner,
+                due,
+                evidence,
+            } => {
+                changed |= upsert_action(&mut state.actions, id, text, owner, due, evidence);
+            }
+            NotesOp::UpdateAction { id, owner, due } => {
+                if let Some(item) = state.actions.iter_mut().find(|item| item.id == id) {
+                    let mut updated = false;
+                    if owner != item.owner {
+                        item.owner = owner;
+                        updated = true;
+                    }
+                    if due != item.due {
+                        item.due = due;
+                        updated = true;
+                    }
+                    changed |= updated;
+                }
+            }
+        }
+    }
+
+    changed
+}
+
+fn upsert_note(items: &mut Vec<NoteItem>, id: String, text: String, evidence: Vec<u64>) -> bool {
+    if let Some(item) = items.iter_mut().find(|item| item.id == id) {
+        let mut updated = false;
+        if item.text != text {
+            item.text = text;
+            updated = true;
+        }
+        if item.evidence != evidence {
+            item.evidence = evidence;
+            updated = true;
+        }
+        return updated;
+    }
+
+    items.push(NoteItem { id, text, evidence });
+    true
+}
+
+fn upsert_action(
+    items: &mut Vec<ActionItem>,
+    id: String,
+    text: String,
+    owner: Option<String>,
+    due: Option<String>,
+    evidence: Vec<u64>,
+) -> bool {
+    if let Some(item) = items.iter_mut().find(|item| item.id == id) {
+        let mut updated = false;
+        if item.text != text {
+            item.text = text;
+            updated = true;
+        }
+        if item.owner != owner {
+            item.owner = owner;
+            updated = true;
+        }
+        if item.due != due {
+            item.due = due;
+            updated = true;
+        }
+        if item.evidence != evidence {
+            item.evidence = evidence;
+            updated = true;
+        }
+        return updated;
+    }
+
+    items.push(ActionItem {
+        id,
+        text,
+        owner,
+        due,
+        evidence,
+    });
+    true
 }
 
 #[cfg(test)]
