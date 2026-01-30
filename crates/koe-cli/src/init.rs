@@ -1,40 +1,198 @@
+use crate::config::{Config, ConfigError, ConfigPaths};
 use clap::Args;
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use thiserror::Error;
 
-const DEFAULT_MODEL: &str = "base.en";
+pub const DEFAULT_WHISPER_MODEL: &str = "base.en";
+const DEFAULT_GROQ_MODEL: &str = "whisper-large-v3-turbo";
 const MODEL_BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+
+struct ModelOption {
+    name: &'static str,
+    size: &'static str,
+}
+
+const WHISPER_MODELS: &[ModelOption] = &[
+    ModelOption {
+        name: "base.en",
+        size: "~142 MB",
+    },
+    ModelOption {
+        name: "small",
+        size: "~466 MB",
+    },
+    ModelOption {
+        name: "medium",
+        size: "~1.5 GB",
+    },
+    ModelOption {
+        name: "large-v3-turbo",
+        size: "~1.5 GB",
+    },
+];
 
 #[derive(Args, Debug, Clone)]
 pub struct InitArgs {
-    /// Whisper model name (e.g. base.en, small, large-v3-turbo)
-    #[arg(long, default_value = DEFAULT_MODEL)]
-    pub model: String,
-
-    /// Override models directory (default: ~/.koe/models)
-    #[arg(long)]
-    pub dir: Option<PathBuf>,
-
-    /// Force re-download even if the model already exists
+    /// Overwrite existing config values
     #[arg(long)]
     pub force: bool,
-
-    /// Write GROQ_API_KEY to .env (defaults to GROQ_API_KEY from current env)
-    #[arg(long)]
-    pub groq_key: Option<String>,
 }
 
-pub fn run(args: &InitArgs) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let models_dir = resolve_models_dir(args.dir.as_ref());
-    fs::create_dir_all(&models_dir)?;
+#[derive(Debug, Error)]
+pub enum InitError {
+    #[error("config error: {0}")]
+    Config(#[from] ConfigError),
+    #[error("io error: {0}")]
+    Io(#[from] io::Error),
+    #[error("init failed: {0}")]
+    Message(String),
+}
 
-    let model_file = model_filename(&args.model);
+pub fn run(args: &InitArgs, paths: &ConfigPaths) -> Result<(), InitError> {
+    print_permissions();
+
+    let mut config = Config::load_or_create(paths)?;
+
+    let mut changed = Vec::new();
+    let mut kept = Vec::new();
+
+    let current_asr_provider = if args.force {
+        ""
+    } else {
+        config.asr.provider.as_str()
+    };
+    let asr_provider = prompt_provider("ASR provider", &["whisper", "groq"], current_asr_provider)?;
+    track_update(
+        &mut config.asr.provider,
+        asr_provider,
+        "asr.provider",
+        &mut changed,
+        &mut kept,
+        args.force,
+    );
+
+    if config.asr.provider == "whisper" {
+        let current_model = if args.force {
+            None
+        } else {
+            current_whisper_model_name(config.asr.model.as_str())
+        };
+        let model_choice =
+            prompt_model_choice(current_model.as_deref().unwrap_or(DEFAULT_WHISPER_MODEL))?;
+        let model_path = download_model(&model_choice, &paths.models_dir, args.force)?;
+        track_update(
+            &mut config.asr.model,
+            model_path.to_string_lossy().to_string(),
+            "asr.model",
+            &mut changed,
+            &mut kept,
+            args.force,
+        );
+    } else {
+        let current_groq_model = if !args.force && config.asr.provider == "groq" {
+            config.asr.model.as_str()
+        } else {
+            ""
+        };
+        let groq_model = prompt_with_default("Groq model", current_groq_model, DEFAULT_GROQ_MODEL)?;
+        track_update(
+            &mut config.asr.model,
+            groq_model,
+            "asr.model",
+            &mut changed,
+            &mut kept,
+            args.force,
+        );
+        let groq_key = prompt_secret("Groq API key", &config.asr.api_key, args.force)?;
+        track_update(
+            &mut config.asr.api_key,
+            groq_key,
+            "asr.api_key",
+            &mut changed,
+            &mut kept,
+            args.force,
+        );
+    }
+
+    let current_summarizer_provider = if args.force {
+        ""
+    } else {
+        config.summarizer.provider.as_str()
+    };
+    let summarizer_provider = prompt_provider(
+        "Summarizer provider",
+        &["ollama", "openrouter"],
+        current_summarizer_provider,
+    )?;
+    track_update(
+        &mut config.summarizer.provider,
+        summarizer_provider,
+        "summarizer.provider",
+        &mut changed,
+        &mut kept,
+        args.force,
+    );
+
+    if config.summarizer.provider == "ollama" {
+        let current_model = if !args.force && config.summarizer.provider == "ollama" {
+            config.summarizer.model.as_str()
+        } else {
+            ""
+        };
+        let model = prompt_with_default("Ollama model tag", current_model, "qwen3:30b-a3b")?;
+        track_update(
+            &mut config.summarizer.model,
+            model,
+            "summarizer.model",
+            &mut changed,
+            &mut kept,
+            args.force,
+        );
+    } else {
+        let current_model = if !args.force && config.summarizer.provider == "openrouter" {
+            config.summarizer.model.as_str()
+        } else {
+            ""
+        };
+        let model =
+            prompt_with_default("OpenRouter model", current_model, "google/gemini-2.5-flash")?;
+        track_update(
+            &mut config.summarizer.model,
+            model,
+            "summarizer.model",
+            &mut changed,
+            &mut kept,
+            args.force,
+        );
+        let key = prompt_secret("OpenRouter API key", &config.summarizer.api_key, args.force)?;
+        track_update(
+            &mut config.summarizer.api_key,
+            key,
+            "summarizer.api_key",
+            &mut changed,
+            &mut kept,
+            args.force,
+        );
+    }
+
+    config.validate()?;
+    Config::write(paths, &config)?;
+
+    print_summary(&changed, &kept);
+    println!("next: koe");
+
+    Ok(())
+}
+
+pub fn download_model(model: &str, models_dir: &Path, force: bool) -> Result<PathBuf, InitError> {
+    fs::create_dir_all(models_dir)?;
+    let model_file = model_filename(model);
     let dest = models_dir.join(model_file);
 
-    if dest.exists() && !args.force {
+    if dest.exists() && !force {
         println!("model already present at {}", dest.display());
-        write_env_file(&dest, args)?;
         return Ok(dest);
     }
 
@@ -45,22 +203,169 @@ pub fn run(args: &InitArgs) -> Result<PathBuf, Box<dyn std::error::Error>> {
     println!("downloading model from {url}");
     download_to_path(&url, &dest)?;
     println!("model saved to {}", dest.display());
-
-    write_env_file(&dest, args)?;
     Ok(dest)
 }
 
-fn resolve_models_dir(dir: Option<&PathBuf>) -> PathBuf {
-    if let Some(override_dir) = dir {
-        return override_dir.to_path_buf();
+fn print_permissions() {
+    println!("permissions required:");
+    println!("System Settings → Privacy & Security → Screen Recording: allow koe");
+    println!("System Settings → Privacy & Security → Microphone: allow koe");
+    println!("restart koe after granting permissions");
+    println!("checklist: [ ] screen recording  [ ] microphone\n");
+}
+
+fn print_summary(changed: &[String], kept: &[String]) {
+    if !changed.is_empty() {
+        println!("updated:");
+        for item in changed {
+            println!("- {item}");
+        }
     }
-    if let Ok(env_dir) = std::env::var("KOE_MODELS_DIR") {
-        return PathBuf::from(env_dir);
+    if !kept.is_empty() {
+        println!("kept:");
+        for item in kept {
+            println!("- {item}");
+        }
     }
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".koe").join("models");
+}
+
+fn prompt_provider(prompt: &str, options: &[&str], current: &str) -> Result<String, InitError> {
+    loop {
+        println!("{prompt}:");
+        for (idx, option) in options.iter().enumerate() {
+            if *option == current {
+                println!("  {}) {} (current)", idx + 1, option);
+            } else {
+                println!("  {}) {}", idx + 1, option);
+            }
+        }
+        let default_index = options
+            .iter()
+            .position(|option| *option == current)
+            .unwrap_or(0);
+        let selection = prompt_line(&format!("select [default {}]: ", default_index + 1))?;
+        let trimmed = selection.trim();
+        if trimmed.is_empty() {
+            return Ok(options[default_index].to_string());
+        }
+        if let Ok(choice) = trimmed.parse::<usize>() {
+            if choice >= 1 && choice <= options.len() {
+                return Ok(options[choice - 1].to_string());
+            }
+        }
+        println!("invalid selection, try again");
     }
-    PathBuf::from("models")
+}
+
+fn prompt_model_choice(current: &str) -> Result<String, InitError> {
+    println!("whisper model (sizes are approximate):");
+    for (idx, option) in WHISPER_MODELS.iter().enumerate() {
+        let label = format!("{} ({})", option.name, option.size);
+        if option.name == current {
+            println!("  {}) {} (current)", idx + 1, label);
+        } else {
+            println!("  {}) {}", idx + 1, label);
+        }
+    }
+    let default_index = WHISPER_MODELS
+        .iter()
+        .position(|option| option.name == current)
+        .unwrap_or(0);
+
+    loop {
+        let selection = prompt_line(&format!("select [default {}]: ", default_index + 1))?;
+        let trimmed = selection.trim();
+        if trimmed.is_empty() {
+            return Ok(WHISPER_MODELS[default_index].name.to_string());
+        }
+        if let Ok(choice) = trimmed.parse::<usize>() {
+            if choice >= 1 && choice <= WHISPER_MODELS.len() {
+                return Ok(WHISPER_MODELS[choice - 1].name.to_string());
+            }
+        }
+        println!("invalid selection, try again");
+    }
+}
+
+fn prompt_with_default(prompt: &str, current: &str, fallback: &str) -> Result<String, InitError> {
+    let default = if current.trim().is_empty() {
+        fallback
+    } else {
+        current
+    };
+    let input = prompt_line(&format!("{prompt} [default {default}]: "))?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
+fn prompt_secret(prompt: &str, current: &str, force: bool) -> Result<String, InitError> {
+    loop {
+        let hint = if !current.trim().is_empty() && !force {
+            "leave blank to keep current"
+        } else {
+            "required"
+        };
+        let input = prompt_line(&format!("{prompt} ({hint}): "))?;
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            if !current.trim().is_empty() && !force {
+                return Ok(current.to_string());
+            }
+            println!("value required");
+            continue;
+        }
+        return Ok(trimmed.to_string());
+    }
+}
+
+fn prompt_line(prompt: &str) -> Result<String, InitError> {
+    print!("{prompt}");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    let bytes = io::stdin().read_line(&mut input)?;
+    if bytes == 0 {
+        return Err(InitError::Message("no input received".into()));
+    }
+    Ok(input)
+}
+
+fn track_update(
+    current: &mut String,
+    next: String,
+    label: &str,
+    changed: &mut Vec<String>,
+    kept: &mut Vec<String>,
+    force: bool,
+) {
+    if !force && *current == next {
+        kept.push(label.to_string());
+        return;
+    }
+    if *current != next {
+        *current = next;
+        changed.push(label.to_string());
+    } else {
+        kept.push(label.to_string());
+    }
+}
+
+fn current_whisper_model_name(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let filename = Path::new(trimmed)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())?;
+    let without_prefix = filename.strip_prefix("ggml-").unwrap_or(&filename);
+    let without_suffix = without_prefix
+        .strip_suffix(".bin")
+        .unwrap_or(without_prefix);
+    Some(without_suffix.to_string())
 }
 
 fn model_filename(model: &str) -> String {
@@ -71,11 +376,10 @@ fn model_filename(model: &str) -> String {
     }
 }
 
-fn download_to_path(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let response = ureq::get(url).call().map_err(|e| {
-        let msg = format!("model download failed: {e}");
-        io::Error::other(msg)
-    })?;
+fn download_to_path(url: &str, dest: &Path) -> Result<(), InitError> {
+    let response = ureq::get(url)
+        .call()
+        .map_err(|e| InitError::Message(format!("model download failed: {e}")))?;
 
     let tmp_path = dest.with_extension("download");
     let mut reader = response.into_body().into_reader();
@@ -84,49 +388,4 @@ fn download_to_path(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Er
     file.sync_all()?;
     fs::rename(tmp_path, dest)?;
     Ok(())
-}
-
-fn write_env_file(model_path: &Path, args: &InitArgs) -> Result<(), io::Error> {
-    let mut lines = match fs::read_to_string(".env") {
-        Ok(contents) => contents.lines().map(|l| l.to_string()).collect(),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
-        Err(err) => return Err(err),
-    };
-
-    let env_groq_key = std::env::var("GROQ_API_KEY").ok();
-    let groq_key = match &args.groq_key {
-        Some(key) => Some(key.as_str()),
-        None => env_groq_key.as_deref(),
-    };
-
-    upsert_env_var(
-        &mut lines,
-        "KOE_WHISPER_MODEL",
-        model_path.to_string_lossy().as_ref(),
-    );
-
-    if let Some(key) = groq_key {
-        upsert_env_var(&mut lines, "GROQ_API_KEY", key);
-    }
-
-    let content = if lines.is_empty() {
-        String::new()
-    } else {
-        let mut joined = lines.join("\n");
-        joined.push('\n');
-        joined
-    };
-    fs::write(".env", content)?;
-    Ok(())
-}
-
-fn upsert_env_var(lines: &mut Vec<String>, key: &str, value: &str) {
-    let prefix = format!("{key}=");
-    for line in lines.iter_mut() {
-        if line.starts_with(&prefix) {
-            *line = format!("{key}={value}");
-            return;
-        }
-    }
-    lines.push(format!("{key}={value}"));
 }

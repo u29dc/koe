@@ -194,10 +194,10 @@ Phase 0: Quality gate wiring
         - Support `--print` (redact keys), `--set key=value` (dotted paths like `asr.provider=whisper`), and `--edit` (opens in $EDITOR) for quick changes.
         - Validate enums (provider names), file paths, and required keys; surface errors with actionable guidance.
         - Define precedence: CLI flags > config file > env vars (env vars optional), and keep precedence consistent across commands.
-    - [ ] `koe init` runs interactive onboarding (local or cloud, model selection, API keys) and persists to config.
+    - [x] `koe init` runs interactive onboarding (local or cloud, model selection, API keys) and persists to config.
         - Prompt order: permissions guidance, ASR choice (local/cloud), model selection or download, summarizer choice (local/cloud), model selection, API key entry; write config and report the next command to run.
         - When local ASR is selected, offer model download options and show disk size; when cloud is selected, prompt for API key and validate non-empty input.
-    - [ ] `koe init` prints macOS permission instructions for Screen Recording + Microphone and notes restart requirements.
+    - [x] `koe init` prints macOS permission instructions for Screen Recording + Microphone and notes restart requirements.
         - Keep output minimal and actionable, include the exact System Settings path, mention that permissions may require a restart, and show a single-line checklist of required grants.
 - Smoke tests:
     - [x] `bun run util:check` completes (not executed).

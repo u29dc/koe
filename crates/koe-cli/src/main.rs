@@ -110,7 +110,7 @@ fn main() {
     if let Some(command) = cli.command {
         match command {
             Command::Init(args) => {
-                if let Err(e) = init::run(&args) {
+                if let Err(e) = init::run(&args, &paths) {
                     eprintln!("init failed: {e}");
                     std::process::exit(1);
                 }
@@ -130,6 +130,7 @@ fn main() {
     apply_config_env(&config, &run);
     let stats = CaptureStats::new();
     let stats_display = stats.clone();
+    let models_dir = paths.models_dir.clone();
 
     let capture = match create_capture(stats.clone()) {
         Ok(c) => c,
@@ -160,7 +161,7 @@ fn main() {
 
     if run.asr == "whisper" {
         let hint = run.model_trn.as_deref();
-        if let Err(e) = ensure_whisper_model(&mut whisper_model, hint) {
+        if let Err(e) = ensure_whisper_model(&mut whisper_model, hint, &models_dir) {
             eprintln!("init failed: {e}");
             std::process::exit(1);
         }
@@ -187,6 +188,7 @@ fn main() {
             let mut current_provider = run.asr.clone();
             let mut whisper_model = whisper_model;
             let groq_model = groq_model;
+            let models_dir = models_dir.clone();
 
             let send_status = |name: String, connected: bool| {
                 let _ = ui_tx.send(UiEvent::AsrStatus { name, connected });
@@ -207,7 +209,9 @@ fn main() {
 
                             let next_model = match next {
                                 "whisper" => {
-                                    if let Err(e) = ensure_whisper_model(&mut whisper_model, None) {
+                                    if let Err(e) =
+                                        ensure_whisper_model(&mut whisper_model, None, &models_dir)
+                                    {
                                         eprintln!("init failed: {e}");
                                         continue;
                                     }
@@ -295,7 +299,11 @@ fn default_speaker(source: AudioSource) -> Option<&'static str> {
     }
 }
 
-fn ensure_whisper_model(model: &mut Option<String>, hint: Option<&str>) -> Result<(), String> {
+fn ensure_whisper_model(
+    model: &mut Option<String>,
+    hint: Option<&str>,
+    models_dir: &std::path::Path,
+) -> Result<(), String> {
     let candidate = hint
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
@@ -316,14 +324,8 @@ fn ensure_whisper_model(model: &mut Option<String>, hint: Option<&str>) -> Resul
         }
     }
 
-    let model_name = candidate.unwrap_or_else(|| "base.en".to_string());
-    let init_args = init::InitArgs {
-        model: model_name,
-        dir: None,
-        force: false,
-        groq_key: None,
-    };
-    let path = init::run(&init_args).map_err(|e| e.to_string())?;
+    let model_name = candidate.unwrap_or_else(|| init::DEFAULT_WHISPER_MODEL.to_string());
+    let path = init::download_model(&model_name, models_dir, false).map_err(|e| e.to_string())?;
     *model = Some(path.to_string_lossy().to_string());
     Ok(())
 }
