@@ -1,0 +1,23 @@
+AGENTS.md
+  3549807fb26e7414 1-23,25-147,149-275
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.40",
+  "base_commit_sha": "a0c2b1bba21f6f234774e716abca7b139a3058df",
+  "prompts": {
+    "3549807fb26e7414": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3908a60a-508c-481f-b9d0-312ab12a1e50",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 275,
+      "total_deletions": 0,
+      "accepted_lines": 273,
+      "overriden_lines": 2
+    }
+  }
+}
