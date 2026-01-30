@@ -6,6 +6,7 @@ pub(crate) fn build_prompt(
     recent: &[TranscriptSegment],
     state: &MeetingState,
     context: Option<&str>,
+    participants: &[String],
 ) -> String {
     let transcript = recent
         .iter()
@@ -26,9 +27,19 @@ pub(crate) fn build_prompt(
         .filter(|value| !value.is_empty())
         .map(|value| format!("Context:\n{value}\n\n"))
         .unwrap_or_default();
+    let participants_list = participants
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    let participants_block = if participants_list.is_empty() {
+        String::new()
+    } else {
+        format!("Participants: {}\n\n", participants_list.join(", "))
+    };
 
     format!(
-        "You are a meeting notes engine. Return ONLY valid JSON with this schema:\n{{\n  \"ops\": [\n    {{\"op\": \"add_key_point\", \"id\": \"kp_1\", \"text\": \"...\", \"evidence\": [1,2]}}\n  ]\n}}\n\nRules:\n- patch-only: add/update ops only, no deletes\n- stable IDs: reuse IDs when updating\n- evidence is a list of transcript segment IDs\n- if no updates, return {{\"ops\": []}}\n- keep notes minimal and information-dense, no filler or repetition\n- prefer short noun phrases; avoid full sentences when possible\n- each text is <= 120 characters and <= 1 sentence\n- return at most 5 ops per response\n- if a transcript line includes a speaker label, preserve it in note text as \"Me:\" or \"Them:\"\n\n{context_block}Transcript:\n{transcript}\n\nCurrent state JSON:\n{state_json}\n"
+        "You are a meeting notes engine. Return ONLY valid JSON with this schema:\n{{\n  \"ops\": [\n    {{\"op\": \"add_key_point\", \"id\": \"kp_1\", \"text\": \"...\", \"evidence\": [1,2]}}\n  ]\n}}\n\nRules:\n- patch-only: add/update ops only, no deletes\n- stable IDs: reuse IDs when updating\n- evidence is a list of transcript segment IDs\n- if no updates, return {{\"ops\": []}}\n- keep notes minimal and information-dense, no filler or repetition\n- prefer short noun phrases; avoid full sentences when possible\n- each text is <= 120 characters and <= 1 sentence\n- return at most 5 ops per response\n- if a transcript line includes a speaker label, preserve it in note text as \"Me:\" or \"Them:\"\n\n{context_block}{participants_block}Transcript:\n{transcript}\n\nCurrent state JSON:\n{state_json}\n"
     )
 }
 
@@ -171,7 +182,7 @@ mod tests {
 
     #[test]
     fn build_prompt_includes_transcript() {
-        let prompt = build_prompt(&[seg(1, "hello")], &MeetingState::default(), None);
+        let prompt = build_prompt(&[seg(1, "hello")], &MeetingState::default(), None, &[]);
         assert!(prompt.contains("Transcript:"));
     }
 
@@ -181,6 +192,7 @@ mod tests {
             &[seg(1, "hello")],
             &MeetingState::default(),
             Some("team sync"),
+            &[],
         );
         assert!(prompt.contains("Context:"));
         assert!(prompt.contains("team sync"));
@@ -192,6 +204,7 @@ mod tests {
             &[seg(1, "keep"), seg_unfinalized(2, "drop")],
             &MeetingState::default(),
             None,
+            &[],
         );
         assert!(prompt.contains("keep"));
         assert!(!prompt.contains("drop"));
@@ -199,7 +212,7 @@ mod tests {
 
     #[test]
     fn build_prompt_is_information_dense() {
-        let prompt = build_prompt(&[seg(1, "alpha")], &MeetingState::default(), None);
+        let prompt = build_prompt(&[seg(1, "alpha")], &MeetingState::default(), None, &[]);
         assert!(prompt.contains("information-dense"));
         assert!(prompt.contains("<= 120"));
         assert!(prompt.contains("at most 5 ops"));
@@ -209,7 +222,19 @@ mod tests {
     fn build_prompt_includes_speaker_labels() {
         let mut with_speaker = seg(1, "hello");
         with_speaker.speaker = Some("Me".to_string());
-        let prompt = build_prompt(&[with_speaker], &MeetingState::default(), None);
+        let prompt = build_prompt(&[with_speaker], &MeetingState::default(), None, &[]);
         assert!(prompt.contains("Me: hello"));
+    }
+
+    #[test]
+    fn build_prompt_includes_participants() {
+        let participants = vec!["Han".to_string(), "Sarah".to_string()];
+        let prompt = build_prompt(
+            &[seg(1, "hello")],
+            &MeetingState::default(),
+            None,
+            &participants,
+        );
+        assert!(prompt.contains("Participants: Han, Sarah"));
     }
 }

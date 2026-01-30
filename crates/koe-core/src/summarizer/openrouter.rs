@@ -62,9 +62,10 @@ impl SummarizerProvider for OpenRouterProvider {
         recent_segments: &[TranscriptSegment],
         state: &MeetingState,
         context: Option<&str>,
+        participants: &[String],
         on_event: &mut dyn FnMut(SummarizerEvent),
     ) -> Result<(), SummarizerError> {
-        let prompt = patch::build_prompt(recent_segments, state, context);
+        let prompt = patch::build_prompt(recent_segments, state, context, participants);
         let url = format!("{}/chat/completions", self.base_url);
         let body = self.build_request_body(&prompt);
 
