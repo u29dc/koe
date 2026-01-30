@@ -117,6 +117,9 @@ fn apply_set(config: &mut Config, assignment: &str) -> Result<(), ConfigError> {
         "session.context" => {
             config.session.context = value.to_string();
         }
+        "session.participants" => {
+            config.session.participants = parse_participants(value)?;
+        }
         "ui.show_transcript" => {
             config.ui.show_transcript = parse_bool(value, key)?;
         }
@@ -179,4 +182,21 @@ fn parse_sources(value: &str) -> Result<Vec<String>, ConfigError> {
         }
     }
     Ok(sources)
+}
+
+fn parse_participants(value: &str) -> Result<Vec<String>, ConfigError> {
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let participants: Vec<String> = value
+        .split(',')
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect();
+    if participants.is_empty() {
+        return Err(ConfigError::Validation(
+            "session.participants must include at least one name".into(),
+        ));
+    }
+    Ok(participants)
 }

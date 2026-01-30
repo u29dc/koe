@@ -134,6 +134,7 @@ impl Default for SummarizerConfig {
 #[serde(default)]
 pub struct SessionConfig {
     pub context: String,
+    pub participants: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,6 +300,13 @@ impl Config {
             return Err(ConfigError::Validation(
                 "ui.color_theme must not be empty".into(),
             ));
+        }
+        for participant in &self.session.participants {
+            if participant.trim().is_empty() {
+                return Err(ConfigError::Validation(
+                    "session.participants entries must not be empty".into(),
+                ));
+            }
         }
 
         Ok(())

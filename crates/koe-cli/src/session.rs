@@ -31,6 +31,7 @@ pub struct SessionMetadata {
     pub end_time: Option<String>,
     pub finalized: bool,
     pub context: Option<String>,
+    pub participants: Vec<String>,
     pub context_file: String,
     pub audio_raw_file: String,
     pub audio_wav_file: String,
@@ -45,6 +46,7 @@ pub struct SessionMetadata {
 impl SessionMetadata {
     pub fn new(
         context: Option<String>,
+        participants: Vec<String>,
         asr_provider: String,
         asr_model: String,
         summarizer_provider: String,
@@ -58,6 +60,7 @@ impl SessionMetadata {
             end_time: None,
             finalized: false,
             context,
+            participants,
             context_file: CONTEXT_FILE.to_string(),
             audio_raw_file: AUDIO_RAW_FILE.to_string(),
             audio_wav_file: AUDIO_WAV_FILE.to_string(),

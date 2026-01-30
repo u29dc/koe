@@ -53,6 +53,10 @@ struct RunArgs {
     /// Meeting context to pass to summarizer and session metadata
     #[arg(long)]
     context: Option<String>,
+
+    /// Preferred participant names (comma-separated)
+    #[arg(long, value_delimiter = ',', value_name = "name,...")]
+    participants: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +66,7 @@ struct ResolvedRunArgs {
     summarizer: String,
     model_sum: Option<String>,
     context: Option<String>,
+    participants: Vec<String>,
 }
 
 impl RunArgs {
@@ -88,6 +93,13 @@ impl RunArgs {
             let value = config.session.context.clone();
             if value.is_empty() { None } else { Some(value) }
         });
+        let participants = self
+            .participants
+            .unwrap_or_else(|| config.session.participants.clone())
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
 
         ResolvedRunArgs {
             asr,
@@ -95,6 +107,7 @@ impl RunArgs {
             summarizer,
             model_sum,
             context,
+            participants,
         }
     }
 }
@@ -413,6 +426,7 @@ fn create_session(
     let summarizer_model = run.model_sum.clone().unwrap_or_default();
     let metadata = session::SessionMetadata::new(
         run.context.clone(),
+        run.participants.clone(),
         run.asr.clone(),
         asr_model,
         run.summarizer.clone(),
