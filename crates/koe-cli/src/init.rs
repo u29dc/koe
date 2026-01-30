@@ -85,6 +85,7 @@ pub fn run(args: &InitArgs, paths: &ConfigPaths) -> Result<(), InitError> {
             &mut config.transcribe.local,
             paths,
             args,
+            false,
             &mut changed,
             &mut kept,
         )?;
@@ -95,6 +96,7 @@ pub fn run(args: &InitArgs, paths: &ConfigPaths) -> Result<(), InitError> {
             &mut config.transcribe.cloud,
             paths,
             args,
+            true,
             &mut changed,
             &mut kept,
         )?;
@@ -126,6 +128,7 @@ pub fn run(args: &InitArgs, paths: &ConfigPaths) -> Result<(), InitError> {
             "summarize.local",
             &mut config.summarize.local,
             args,
+            false,
             &mut changed,
             &mut kept,
         )?;
@@ -135,6 +138,7 @@ pub fn run(args: &InitArgs, paths: &ConfigPaths) -> Result<(), InitError> {
             "summarize.cloud",
             &mut config.summarize.cloud,
             args,
+            true,
             &mut changed,
             &mut kept,
         )?;
@@ -321,46 +325,21 @@ fn configure_transcribe_profile(
     profile: &mut ProviderConfig,
     paths: &ConfigPaths,
     args: &InitArgs,
+    is_cloud: bool,
     changed: &mut Vec<String>,
     kept: &mut Vec<String>,
 ) -> Result<(), InitError> {
-    let current_provider = if args.force {
-        ""
-    } else {
-        profile.provider.as_str()
-    };
-    let provider = prompt_provider(
-        &format!("{label} provider"),
-        &["whisper", "groq"],
-        current_provider,
-    )?;
+    let provider = if is_cloud { "groq" } else { "whisper" };
     track_update(
         &mut profile.provider,
-        provider,
+        provider.to_string(),
         &format!("{label}.provider"),
         changed,
         kept,
         args.force,
     );
 
-    if profile.provider == "whisper" {
-        let current_model = if args.force {
-            None
-        } else {
-            current_whisper_model_name(profile.model.as_str())
-        };
-        let model_choice =
-            prompt_model_choice(current_model.as_deref().unwrap_or(DEFAULT_WHISPER_MODEL))?;
-        let model_path = download_model(&model_choice, &paths.models_dir, args.force)?;
-        track_update(
-            &mut profile.model,
-            model_path.to_string_lossy().to_string(),
-            &format!("{label}.model"),
-            changed,
-            kept,
-            args.force,
-        );
-    } else {
+    if is_cloud {
         let current_groq_model = if args.force {
             ""
         } else {
@@ -384,6 +363,23 @@ fn configure_transcribe_profile(
             kept,
             args.force,
         );
+    } else {
+        let current_model = if args.force {
+            None
+        } else {
+            current_whisper_model_name(profile.model.as_str())
+        };
+        let model_choice =
+            prompt_model_choice(current_model.as_deref().unwrap_or(DEFAULT_WHISPER_MODEL))?;
+        let model_path = download_model(&model_choice, &paths.models_dir, args.force)?;
+        track_update(
+            &mut profile.model,
+            model_path.to_string_lossy().to_string(),
+            &format!("{label}.model"),
+            changed,
+            kept,
+            args.force,
+        );
     }
     Ok(())
 }
@@ -392,44 +388,21 @@ fn configure_summarize_profile(
     label: &str,
     profile: &mut ProviderConfig,
     args: &InitArgs,
+    is_cloud: bool,
     changed: &mut Vec<String>,
     kept: &mut Vec<String>,
 ) -> Result<(), InitError> {
-    let current_provider = if args.force {
-        ""
-    } else {
-        profile.provider.as_str()
-    };
-    let provider = prompt_provider(
-        &format!("{label} provider"),
-        &["ollama", "openrouter"],
-        current_provider,
-    )?;
+    let provider = if is_cloud { "openrouter" } else { "ollama" };
     track_update(
         &mut profile.provider,
-        provider,
+        provider.to_string(),
         &format!("{label}.provider"),
         changed,
         kept,
         args.force,
     );
 
-    if profile.provider == "ollama" {
-        let current_model = if args.force {
-            ""
-        } else {
-            profile.model.as_str()
-        };
-        let model = prompt_with_default("Ollama model tag", current_model, "qwen3:30b-a3b")?;
-        track_update(
-            &mut profile.model,
-            model,
-            &format!("{label}.model"),
-            changed,
-            kept,
-            args.force,
-        );
-    } else {
+    if is_cloud {
         let current_model = if args.force {
             ""
         } else {
@@ -450,6 +423,21 @@ fn configure_summarize_profile(
             &mut profile.api_key,
             key,
             &format!("{label}.api_key"),
+            changed,
+            kept,
+            args.force,
+        );
+    } else {
+        let current_model = if args.force {
+            ""
+        } else {
+            profile.model.as_str()
+        };
+        let model = prompt_with_default("Ollama model tag", current_model, "qwen3:30b-a3b")?;
+        track_update(
+            &mut profile.model,
+            model,
+            &format!("{label}.model"),
             changed,
             kept,
             args.force,
