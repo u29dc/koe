@@ -327,7 +327,7 @@ Phase 4: Latency comparison + polish
         - Transcript JSONL schema: `{id, start_ms, end_ms, speaker, text, finalized, source}`; append per segment, keep one JSON object per line.
         - Notes JSON schema: full `MeetingState` snapshot with key_points/actions/decisions; include `updated_at` timestamp for snapshots.
         - Audio raw format: PCM f32 little-endian, 48 kHz, mono, interleaved; record exact format in metadata for WAV finalization.
-    - [ ] Audio, transcript, and notes are continuously written during the session.
+    - [x] Audio, transcript, and notes are continuously written during the session.
         - Persist audio from local capture even when cloud ASR is used. Write `audio.raw` continuously with periodic flush, and finalize to `audio.wav` on clean shutdown; maintain a transcript append file (e.g., `transcript.jsonl`) and a notes snapshot (`notes.json`).
         - Use atomic write patterns for metadata and notes snapshots (write temp + rename) to survive crashes.
         - Define checkpoint interval (e.g., every 5–10 s) and ensure partial data is still readable on crash.

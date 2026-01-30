@@ -9,8 +9,9 @@ use config::{Config, ConfigPaths};
 use koe_core::asr::{AsrProvider, create_asr};
 use koe_core::capture::create_capture;
 use koe_core::process::ChunkRecvTimeoutError;
-use koe_core::types::{AudioSource, CaptureStats, NotesPatch};
+use koe_core::types::{AudioChunk, AudioSource, CaptureStats, NotesPatch};
 use session::SessionHandle;
+use std::io::Write;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -211,6 +212,13 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let audio_raw = match session.open_audio_raw() {
+        Ok(handle) => handle,
+        Err(err) => {
+            eprintln!("session audio init failed: {err}");
+            std::process::exit(1);
+        }
+    };
     let (ui_tx, ui_rx) = mpsc::channel();
     let _ = ui_tx.send(UiEvent::NotesPatch(NotesPatch { ops: Vec::new() }));
     let (asr_cmd_tx, asr_cmd_rx) = mpsc::channel();
@@ -222,6 +230,7 @@ fn main() {
             let mut whisper_model = whisper_model;
             let groq_model = groq_model;
             let models_dir = models_dir.clone();
+            let mut audio_raw = audio_raw;
 
             let send_status = |name: String, connected: bool| {
                 let _ = ui_tx.send(UiEvent::AsrStatus { name, connected });
@@ -274,6 +283,9 @@ fn main() {
                     Err(ChunkRecvTimeoutError::Timeout) => continue,
                     Err(ChunkRecvTimeoutError::Disconnected) => break,
                 };
+                if let Err(err) = append_audio_raw(&mut audio_raw, &chunk) {
+                    eprintln!("audio write failed: {err}");
+                }
 
                 let (mut segments, elapsed) = match transcribe_with_latency(asr.as_mut(), &chunk) {
                     Ok(result) => result,
@@ -390,6 +402,13 @@ fn transcribe_with_latency(
     let start = Instant::now();
     let segments = asr.transcribe(chunk)?;
     Ok((segments, start.elapsed().as_millis()))
+}
+
+fn append_audio_raw(file: &mut std::fs::File, chunk: &AudioChunk) -> std::io::Result<()> {
+    for sample in &chunk.pcm_mono_f32 {
+        file.write_all(&sample.to_le_bytes())?;
+    }
+    Ok(())
 }
 
 fn apply_config_env(config: &Config, run: &ResolvedRunArgs) {

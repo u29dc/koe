@@ -1,7 +1,9 @@
 use crate::config::ConfigPaths;
+use koe_core::types::{MeetingState, TranscriptSegment};
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -19,6 +21,8 @@ pub enum SessionError {
     Io(#[from] io::Error),
     #[error("session metadata error: {0}")]
     Metadata(#[from] toml::ser::Error),
+    #[error("session json error: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("session time error: {0}")]
     Time(#[from] time::error::Format),
 }
@@ -86,6 +90,7 @@ impl SessionMetadata {
 
 #[derive(Debug)]
 pub struct SessionHandle {
+    dir: PathBuf,
     metadata_path: PathBuf,
     context_path: PathBuf,
     metadata: SessionMetadata,
@@ -110,6 +115,7 @@ impl SessionHandle {
         fs::write(notes_path, [])?;
 
         Ok(Self {
+            dir,
             metadata_path,
             context_path,
             metadata,
@@ -120,11 +126,49 @@ impl SessionHandle {
         self.metadata.context.as_deref()
     }
 
+    pub fn open_audio_raw(&self) -> Result<std::fs::File, SessionError> {
+        Ok(OpenOptions::new()
+            .append(true)
+            .open(self.audio_raw_path())?)
+    }
+
+    pub fn append_transcript(&self, segments: &[TranscriptSegment]) -> Result<(), SessionError> {
+        if segments.is_empty() {
+            return Ok(());
+        }
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(self.transcript_path())?;
+        for segment in segments {
+            let line = serde_json::to_string(segment)?;
+            file.write_all(line.as_bytes())?;
+            file.write_all(b"\n")?;
+        }
+        Ok(())
+    }
+
+    pub fn write_notes(&self, state: &MeetingState) -> Result<(), SessionError> {
+        let payload = serde_json::to_string_pretty(state)?;
+        write_atomic(&self.notes_path(), payload.as_bytes())
+    }
+
     pub fn update_context(&mut self, context: String) -> Result<(), SessionError> {
         self.metadata.context = Some(context.clone());
         write_atomic(&self.context_path, context.as_bytes())?;
         write_metadata(&self.metadata_path, &self.metadata)?;
         Ok(())
+    }
+
+    fn audio_raw_path(&self) -> PathBuf {
+        self.dir.join(&self.metadata.audio_raw_file)
+    }
+
+    fn transcript_path(&self) -> PathBuf {
+        self.dir.join(&self.metadata.transcript_file)
+    }
+
+    fn notes_path(&self) -> PathBuf {
+        self.dir.join(&self.metadata.notes_file)
     }
 }
 

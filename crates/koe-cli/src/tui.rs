@@ -129,11 +129,17 @@ pub fn run(
         loop {
             match ui_rx.try_recv() {
                 Ok(UiEvent::Transcript(segments)) => {
+                    if let Err(err) = session.append_transcript(&segments) {
+                        eprintln!("session transcript write failed: {err}");
+                    }
                     ledger.append(segments);
                     transcript_needs_render = true;
                 }
                 Ok(UiEvent::NotesPatch(patch)) => {
                     if apply_notes_patch(&mut meeting_state, patch) {
+                        if let Err(err) = session.write_notes(&meeting_state) {
+                            eprintln!("session notes write failed: {err}");
+                        }
                         notes_needs_render = true;
                     }
                 }
