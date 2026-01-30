@@ -248,7 +248,7 @@ Phase 3: Notes engine (patch-only)
 - Done criteria:
     - [x] Ollama provider emits NotesPatch.
         - Implement a summarizer provider that calls Ollama and parses a patch-only response. Keep the prompt and response schema stable to avoid parse failures. Treat network errors as non-fatal and try again on the next cycle.
-    - [ ] OpenRouter provider emits NotesPatch.
+    - [x] OpenRouter provider emits NotesPatch.
         - Add a second provider with similar patch parsing, but with OpenRouter-specific authentication. Validate response shape and ensure timeouts and retries are consistent with Groq. The provider should be swappable at runtime like ASR.
     - [ ] Notes pane updates without full rewrites.
         - Apply patches to a persistent `MeetingState` so only incremental updates are rendered. Avoid full re-render of notes to keep the UI stable and reduce flicker. Ensure patches only add or update, never delete silently.
