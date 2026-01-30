@@ -304,10 +304,13 @@ Phase 3: Notes engine (patch-only)
 - Smoke tests:
     - [ ] Decision phrasing triggers new decision item.
         - Use test phrases that match the summarizer prompt and confirm a new decision appears. Check that it references the correct transcript evidence IDs. Verify that repeated phrases do not create duplicates.
+        - BLOCKED: Requires live summarizer execution to validate LLM-driven decision extraction; cannot run external model or interactive session here; tried only prompt/unit-level changes; next steps: run `koe` with Ollama/OpenRouter enabled, speak a decision phrase (e.g., "We decided to ship on Friday"), confirm a decision NotesPatch is produced with evidence IDs; file refs: `crates/koe-core/src/summarizer/patch.rs`, `crates/koe-cli/src/tui.rs`.
     - [ ] Action phrasing triggers new action item.
         - Use phrases with clear owner and due date language. Validate parsing of optional fields like owner and due date. Ensure the item shows up in the correct notes section.
+        - BLOCKED: Requires live summarizer execution to validate LLM-driven action extraction; cannot run external model or interactive session here; tried only prompt/unit-level changes; next steps: run `koe` with Ollama/OpenRouter enabled, speak an action phrase with owner/due (e.g., "Han will send the draft by Tuesday"), confirm action item appears with owner/due; file refs: `crates/koe-core/src/summarizer/patch.rs`, `crates/koe-cli/src/tui.rs`.
     - [ ] No duplicates after multiple cycles.
         - Run the summarizer multiple times without new transcript segments. The notes list should remain stable with no new items. If duplicates appear, adjust prompt or patch logic to enforce idempotency.
+        - BLOCKED: Requires live summarizer execution over multiple cycles; cannot run external model or interactive session here; tried only prompt/unit-level changes; next steps: run `koe`, let summarizer run multiple intervals without new speech, confirm no duplicate notes; adjust prompt/idempotency logic if duplicates appear; file refs: `crates/koe-core/src/summarizer/patch.rs`, `crates/koe-cli/src/tui.rs`.
 
 Phase 4: Latency comparison + polish
 
