@@ -221,13 +221,13 @@ Phase 2: ASR + transcript ledger + TUI
         - Add explicit request timeouts and retry policy so a stalled request does not block the ASR worker forever. Ensure the Groq API key is read from the environment and errors are surfaced clearly to the UI. Keep the WAV encoding format stable; Groq expects WAV audio with a valid header.
     - [x] Transcript ledger implemented (`crates/koe-core/src/transcript.rs`).
         - Keep the overlap window in sync with chunker overlap. If you adjust chunk overlap, adjust `OVERLAP_WINDOW_MS` to match. Maintain tests for dedupe behavior because this directly affects transcript quality.
-    - [ ] ASR worker consumes chunks and emits transcript events to UI.
+    - [x] ASR worker consumes chunks and emits transcript events to UI.
         - Add a worker thread or task that reads from `chunk_rx`, calls the selected provider, and emits a `TranscriptEvent` (or equivalent) on a channel to the UI. Keep this loop resilient: skip empty segments, keep running on transient failures, and surface errors as events. This is the main wiring step that makes the app functional.
-    - [ ] CLI flags wire into ASR provider creation (`crates/koe-cli/src/main.rs`).
+    - [x] CLI flags wire into ASR provider creation (`crates/koe-cli/src/main.rs`).
         - Use `--asr` and `--model-trn` to call `create_asr` and pass the provider into the runtime. If the provider fails to initialize, exit with a clear error that points to missing model or API key. Ensure defaults align with the plan.
-    - [ ] Transcript renders in TUI (currently placeholder text).
+    - [x] Transcript renders in TUI (currently placeholder text).
         - Keep a local transcript buffer in the TUI state and update it when new events arrive. Render a limited window to keep UI responsive and avoid huge redraws. Make sure text wrapping is stable and that the UI does not flicker on updates.
-    - [ ] Speaker labeling (mic = "Me", system = "Them").
+    - [x] Speaker labeling (mic = "Me", system = "Them").
         - Map `AudioChunk.source` to `TranscriptSegment.speaker` at the time of segment creation. If a mixed stream is used, set speaker to `None` or `Unknown`. This is also the hook to later integrate diarization if needed.
     - [ ] Provider switching without restart (command surface missing).
         - Define a command channel from UI to core and support hotkeys to switch providers. Recreate the provider in the ASR worker and emit a status event to update the UI. Ensure in-flight chunks are handled safely during switches.

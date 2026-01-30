@@ -124,15 +124,11 @@ fn main() {
                     continue;
                 }
 
-                let speaker = match chunk.source {
-                    AudioSource::Microphone => "me",
-                    AudioSource::System => "them",
-                    AudioSource::Mixed => "mixed",
-                };
-
-                for seg in &mut segments {
-                    if seg.speaker.is_none() {
-                        seg.speaker = Some(speaker.to_string());
+                if let Some(speaker) = default_speaker(chunk.source) {
+                    for seg in &mut segments {
+                        if seg.speaker.is_none() {
+                            seg.speaker = Some(speaker.to_string());
+                        }
                     }
                 }
 
@@ -155,5 +151,26 @@ fn main() {
 
     if let Some(handle) = asr_thread {
         let _ = handle.join();
+    }
+}
+
+fn default_speaker(source: AudioSource) -> Option<&'static str> {
+    match source {
+        AudioSource::Microphone => Some("Me"),
+        AudioSource::System => Some("Them"),
+        AudioSource::Mixed => Some("Unknown"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_speaker;
+    use koe_core::types::AudioSource;
+
+    #[test]
+    fn default_speaker_maps_sources() {
+        assert_eq!(default_speaker(AudioSource::Microphone), Some("Me"));
+        assert_eq!(default_speaker(AudioSource::System), Some("Them"));
+        assert_eq!(default_speaker(AudioSource::Mixed), Some("Unknown"));
     }
 }
