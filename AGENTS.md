@@ -256,10 +256,10 @@ Phase 2: transcribe + transcript ledger + TUI
         - Track time spent per chunk in the transcribe worker and emit rolling latency metrics. Display the active mode and last latency in the status bar alongside capture stats. This is essential for troubleshooting local vs cloud performance.
     - [x] Mutable window corrections only affect last 15 s (not implemented).
         - Implement a mutable transcript window and finalize segments that are older than the window. When new transcribe results overlap finalized segments, do not alter them. Keep this window consistent with the chunk overlap to prevent duplicate text.
-    - [x] Minimal full-screen TUI with a focused notes pane and optional transcript pane.
-        - Default view is notes-only; toggle transcript visibility with a single key (e.g., `t`). When visible, show transcript on one side and notes on the other with stable layout and no flicker.
-        - Provide a clear status line with provider/lag/capture stats, and keep layout stable when toggling panes (no shifting widths).
-        - Document key bindings in a single place (help overlay or footer) and keep them consistent: quit, toggle transcript, switch mode, set context.
+    - [x] Minimal full-screen TUI with a focused notes pane and transcript pane always visible.
+        - Two-pane layout is the only view: notes on one side and transcript on the other with stable layout and no flicker.
+        - Provide a clear status line with provider/lag/capture stats, and keep layout stable.
+        - Document key bindings in a single place (help overlay or footer) and keep them consistent: quit, switch mode, set context.
     - [x] Color system: other-party content uses a restrained blue, self content uses neutral gray, headings are subtle and consistent.
         - Apply colors consistently in both transcript and notes; blue is reserved for “Them” content, gray for “Me,” and neutral for headings/metadata.
         - Keep palette minimal and readable; avoid bright or noisy styling. Ensure colors remain legible in common terminal themes.
@@ -277,9 +277,9 @@ Phase 2: transcribe + transcript ledger + TUI
         - Speak continuous speech over multiple chunks and verify deduplication in the transcript ledger. If duplicates appear, adjust similarity threshold or merge policy. Document any changes to the similarity heuristic.
     - [x] Switch modes without crash.
         - Switch modes repeatedly during active audio capture. Ensure the worker restarts cleanly and the UI status updates. This test should not leak threads or leave the provider in a half-initialized state.
-    - [ ] Toggle transcript pane repeatedly without layout glitches.
-        - Verify the notes pane remains stable and the transcript pane cleanly hides/shows without resizing artifacts.
-        - BLOCKED: Manual UI toggle verification cannot be completed in this non-interactive environment; tried only code-level implementation; next steps: run `bun run koe`, press `t` repeatedly during active UI, confirm layout stability; file refs: `crates/koe-cli/src/tui.rs`.
+    - [ ] Two-pane layout remains stable during repeated updates.
+        - Verify the notes and transcript panes stay aligned with no width jitter during rapid updates.
+        - BLOCKED: Requires interactive TUI validation; cannot run here; tried only code-level implementation; next steps: run `bun run koe`, observe layout stability during active updates; file refs: `crates/koe-cli/src/tui.rs`.
 
 Phase 3: Notes engine (patch-only)
 
@@ -349,54 +349,62 @@ Phase 4: Latency comparison + polish
     - [x] Export produces valid transcript.md and notes.json.
         - Validate the output format with a simple parser or quick manual check. Ensure files include metadata like timestamps or session ID if desired. Confirm the export does not include partial or duplicated entries.
 
-Phase 5: TUI design polish
-
-- Target layout (split view, meeting active):
-
-    ```
-    ┌────────────────────────────────────────────────────────────────────┐
-    │ ■ koe v0.0.1                              ctrl+p command palette   │
-    │                                  │                                 │
-    │  · They worked with that agency  │  Them: So the timeline is...    │
-    │    before — Sarah                │  Me: Yeah that works for me     │
-    │  · Han knows someone at that     │  Them: We worked with them      │
-    │    agency from a past project    │    before actually              │
-    │  · Budget is flexible up to 50k  │  Me: Oh nice, I know someone    │
-    │    — Them                        │    there from a past project    │
-    │  · Targeting Friday for v2 ship  │  Them: Budget is flexible,      │
-    │  · Han to send draft by Tuesday  │    up to 50k                    │
-    │  · Need repo access shared       │  Me: Let's target Friday        │
-    │    before EOD — Them             │  Them: Works for me             │
-    │                                  │                                 │
-    │ 12:34  ▁▂▃▅▃▂▁▂▃▅▃▂  transcribe:cloud lag:1.2s chunks:42/0 segs:18 │
-    └────────────────────────────────────────────────────────────────────┘
-    ```
-
-    Title bar: accent square (U+25A0) + app name left, palette hint right.
-    Content: notes 55% left (rolling moment-capture bullets, no categories) | dim separator | transcript 45% right.
-    Footer: timer | audio viz | compact metrics.
-
-- Command palette overlay (centered modal):
-
-    ```
-    ┌──────────────────────────────────────────┐
-    │           Command Palette                │
-    │ > [filter input]                         │
-    │                                          │
-    │   meeting  end meeting                   │
-    │   meeting  pause capture                 │
-    │   meeting  force summarize               │
-    │   setting  switch transcribe mode        │
-    │   setting  switch summarize mode         │
-    │   setting  edit context                  │
-    │      view  toggle transcript             │
-    └──────────────────────────────────────────┘
-    ```
-
-    Category tags right-aligned dim; labels neutral; selected row accent bg.
-    No footer in palette; version info already in title bar.
+Phase 5: Reliability, correctness, and ops hardening
 
 - Done criteria:
+    - [x] All network calls have explicit timeouts + bounded retries.
+        - Apply to Groq transcribe, OpenRouter summarize, Ollama summarize, and model downloads.
+        - Use per-request connect/read timeouts and retry with backoff; surface failures in the UI status line or logs.
+    - [x] RT audio callback is lock-free and allocation-free.
+        - Remove Mutex usage from `OutputHandler` callback path; if contended, drop frames immediately.
+        - Move downmixing and any heap usage to the processor thread; validate no allocations in callback.
+    - [x] Audio export includes `audio.wav` finalization.
+        - Convert `audio.raw` (f32 LE, 48 kHz mono) to WAV on clean shutdown/export.
+        - Write the WAV file named in metadata and ensure metadata fields are accurate.
+    - [x] Session artifacts are written with strict permissions.
+        - Apply 0600 permissions to `metadata.toml`, `context.txt`, `notes.json`, `transcript.jsonl`, and `audio.raw`.
+        - Warn if permissions are looser on existing files.
+    - [x] Summarize queue is bounded and skip-if-busy.
+        - Cap summarize input queue at 1; drop/skip when busy to avoid backlog.
+    - [x] Transcript ledger is memory bounded for long sessions.
+        - Prune finalized segments after persistence or cap the in-memory window.
+    - [x] Raw audio writes do not block the processing thread.
+        - Move disk IO to a writer thread or queue with backpressure; keep processor real-time.
+    - [x] Meeting end/export drains in-flight audio and transcription.
+        - Pause capture, flush chunk queue, and wait for transcribe thread to finish before export.
+    - [x] Status bar includes provider name and frame drops.
+        - Display active provider, capture frame drops, chunk drops, and lag in a fixed-width footer.
+    - [x] Config precedence matches spec: CLI > config > env.
+        - Apply env overrides last-resort only; document the precedence clearly.
+    - [x] `koe config --edit` supports `$EDITOR` with args.
+        - Parse editor command + args and pass the config path correctly.
+    - [x] Dependency and tooling metadata aligned with the repo spec.
+        - `rust-version` matches declared minimum; commitlint scopes match documented scopes.
+- Smoke tests:
+    - [ ] Simulate offline network and confirm transcribe/summarize time out and recover.
+        - Use an invalid endpoint or disconnect network; verify UI status indicates failure and retries.
+        - BLOCKED: Requires changing network conditions or running live providers; cannot simulate offline or run the TUI here; tried only code-level review; next steps: disable network or set invalid endpoints (e.g., `OPENROUTER_BASE_URL`, `OLLAMA_BASE_URL`), run `bun run koe`, observe status/reties; file refs: `crates/koe-core/src/transcribe/groq.rs`, `crates/koe-core/src/summarize/openrouter.rs`, `crates/koe-core/src/summarize/ollama.rs`, `crates/koe-cli/src/tui.rs`.
+    - [ ] Run a 30-minute session without memory growth beyond a fixed cap.
+        - Track resident memory; confirm ledger pruning keeps memory stable.
+        - BLOCKED: Requires a long-running interactive capture session; cannot run a 30-minute TUI here; tried only code-level checks; next steps: run `bun run koe` for 30 minutes, monitor RSS, confirm ledger pruning; file refs: `crates/koe-core/src/transcript.rs`, `crates/koe-cli/src/tui.rs`.
+    - [ ] End a meeting during active speech and verify no transcript loss.
+        - Confirm final transcript contains the last spoken phrase after export.
+        - BLOCKED: Requires live audio capture and interactive end-meeting; cannot verify in this environment; tried only code-level drain/export wiring; next steps: run `bun run koe`, speak and end meeting mid-utterance, confirm export includes final phrase; file refs: `crates/koe-cli/src/tui.rs`, `crates/koe-cli/src/session.rs`.
+    - [ ] Restart after a crash and verify session artifacts are readable with correct permissions.
+        - Confirm metadata has `finalized=false` and files are intact.
+        - BLOCKED: Requires killing a live process and inspecting session artifacts; cannot run or kill interactive TUI here; tried only code-level persistence review; next steps: start `bun run koe`, kill process, inspect `~/.koe/sessions/{id}` for artifacts and permissions; file refs: `crates/koe-cli/src/session.rs`.
+
+Phase 6: TUI design polish
+
+- Done criteria:
+    - [x] Target layout:
+        - (split view, meeting active):
+        - Title bar: accent square (U+25A0) + app name left, palette hint right.
+        - Content: notes 55% left (rolling moment-capture bullets, no categories) | dim separator | transcript 45% right.
+        - Footer: timer | audio viz | compact metrics.
+        - Command palette overlay (centered modal):
+        - Category tags right-aligned dim; labels neutral; selected row accent bg.
+        - No footer in palette; version info already in title bar.
     - [x] Title bar: accent-colored filled square (U+25A0) + `koe v{version}` left-aligned; `ctrl+p command palette` hint right-aligned in muted text; no borders, single styled line (`crates/koe-cli/src/tui.rs`).
     - [x] Accent color: aqua/turquoise RGB(0, 190, 190) or RGB(80, 200, 200); used only for title square, app name, and command palette selection highlight; everything else grayscale.
     - [x] No box-drawing borders: panes separated by 1-column dim vertical separator and whitespace; content has 1-char left padding; section names rendered as first line in heading color, not border titles.
@@ -411,11 +419,11 @@ Phase 5: TUI design polish
         - No footer in palette; version info already present in title bar. Keep palette clean and minimal.
         - Width ~60 chars, height fits content (max ~15 rows + header); modal blocks underlying input.
     - [x] Context-aware command sets driven by app state (`crates/koe-cli/src/tui.rs`).
-        - Idle: start meeting, switch transcribe/summarize mode, set transcribe/summarize model, edit context, toggle transcript, browse sessions.
-        - MeetingActive: end meeting, pause capture, force summarize, switch transcribe/summarize mode, edit context, toggle transcript.
+        - Idle: start meeting, switch transcribe/summarize mode, set transcribe/summarize model, edit context, browse sessions.
+        - MeetingActive: end meeting, pause capture, force summarize, switch transcribe/summarize mode, edit context.
         - PostMeeting: copy transcript/notes/audio path to clipboard, open session folder, export markdown, start new meeting, browse sessions.
     - [x] State machine: Idle -> MeetingActive -> PostMeeting -> Idle; drives palette commands, footer timer behavior, and audio viz state.
-    - [x] Pane layout unchanged: notes-only default (full width); palette "toggle transcript" splits 55/45; notes always visible left, transcript right; last 200 segments; auto-scroll to bottom.
+    - [x] Pane layout unchanged: fixed two-pane 55/45 split; notes always visible left, transcript right; last 200 segments; auto-scroll to bottom.
 - Smoke tests:
     - [ ] `ctrl+p` opens palette overlay with correct commands for current state; Esc dismisses; filter narrows results.
         - BLOCKED: Requires interactive TUI validation; non-interactive environment cannot open the terminal UI or send key input; tried only code-level implementation; next steps: run `bun run koe`, press `ctrl+p`, verify palette opens, Esc dismisses, and filter narrows; file refs: `crates/koe-cli/src/tui.rs`.
@@ -423,7 +431,7 @@ Phase 5: TUI design polish
         - BLOCKED: Requires interactive meeting lifecycle to observe timer behavior; no live TUI session available here; tried only code-level implementation; next steps: run `bun run koe`, start/end/start meetings via palette, confirm timer transitions; file refs: `crates/koe-cli/src/tui.rs`.
     - [ ] Audio waveform animates during capture, goes flat when stopped.
         - BLOCKED: Requires live capture and UI rendering; cannot verify animation in this environment; tried only code-level implementation; next steps: run `bun run koe`, start meeting, observe waveform animation; end meeting and confirm flat line; file refs: `crates/koe-cli/src/tui.rs`.
-    - [ ] All actions (toggle transcript, switch provider, edit context, end meeting, copy exports) accessible and functional through palette only.
+    - [ ] All actions (switch provider, edit context, end meeting, copy exports) accessible and functional through palette only.
         - BLOCKED: Requires manual palette interaction and system integrations (clipboard/open); cannot exercise in non-interactive session; tried only code-level wiring; next steps: run `bun run koe`, open palette and execute each command, confirm expected behavior; file refs: `crates/koe-cli/src/tui.rs`.
 
 ## 9. Resolved Decisions
