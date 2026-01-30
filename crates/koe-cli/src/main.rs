@@ -28,6 +28,7 @@ struct Cli {
 }
 
 fn main() {
+    dotenvy::dotenv().ok();
     let cli = Cli::parse();
 
     let stats = CaptureStats::new();
@@ -49,7 +50,15 @@ fn main() {
         }
     };
 
-    let mut asr = match create_asr(cli.asr.as_str(), cli.model_trn.as_deref()) {
+    let model_trn_env = std::env::var("KOE_WHISPER_MODEL").ok();
+    let model_groq_env = std::env::var("KOE_GROQ_MODEL").ok();
+    let model_trn = if cli.asr == "groq" {
+        cli.model_trn.as_deref().or(model_groq_env.as_deref())
+    } else {
+        cli.model_trn.as_deref().or(model_trn_env.as_deref())
+    };
+
+    let mut asr = match create_asr(cli.asr.as_str(), model_trn) {
         Ok(provider) => provider,
         Err(e) => {
             eprintln!("asr init failed: {e}");
