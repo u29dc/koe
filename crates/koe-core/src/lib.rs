@@ -1,5 +1,6 @@
 pub mod capture;
 pub mod error;
+mod http;
 pub mod process;
 pub mod summarize;
 pub mod transcribe;

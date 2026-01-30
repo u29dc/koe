@@ -1,7 +1,9 @@
 use crate::SummarizeError;
+use crate::http::{default_agent, retry_delay, should_retry};
 use crate::types::{MeetingState, SummarizeEvent, TranscriptSegment};
 use serde::Deserialize;
 use serde_json::json;
+use std::thread;
 
 use super::{SummarizeProvider, patch};
 
@@ -9,11 +11,13 @@ const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_MODEL: &str = "google/gemini-2.5-flash";
 const SYSTEM_PROMPT: &str =
     "You are a meeting notes engine. Follow the instructions and output only JSON.";
+const MAX_RETRIES: usize = 2;
 
 pub struct OpenRouterProvider {
     model: String,
     base_url: String,
     api_key: String,
+    agent: ureq::Agent,
 }
 
 impl OpenRouterProvider {
@@ -29,6 +33,7 @@ impl OpenRouterProvider {
             model: model.unwrap_or(DEFAULT_MODEL).to_string(),
             base_url,
             api_key,
+            agent: default_agent(),
         })
     }
 
@@ -70,17 +75,45 @@ impl SummarizeProvider for OpenRouterProvider {
     ) -> Result<(), SummarizeError> {
         let prompt = patch::build_prompt(recent_segments, state, context, participants);
         let url = format!("{}/chat/completions", self.base_url);
-        let body = self.build_request_body(&prompt);
+        let mut last_error: Option<ureq::Error> = None;
+        let mut raw_body: Option<String> = None;
 
-        let response = ureq::post(&url)
-            .header("Authorization", &format!("Bearer {}", self.api_key))
-            .send_json(body)
-            .map_err(|e| SummarizeError::Network(format!("{e}")))?;
+        for attempt in 0..=MAX_RETRIES {
+            let body = self.build_request_body(&prompt);
+            let response = self
+                .agent
+                .post(&url)
+                .header("Authorization", &format!("Bearer {}", self.api_key))
+                .send_json(body);
 
-        let raw = response
-            .into_body()
-            .read_to_string()
-            .map_err(|e| SummarizeError::Network(format!("{e}")))?;
+            match response {
+                Ok(resp) => {
+                    let raw = resp
+                        .into_body()
+                        .read_to_string()
+                        .map_err(|e| SummarizeError::Network(format!("{e}")))?;
+                    raw_body = Some(raw);
+                    break;
+                }
+                Err(err) => {
+                    let retry = should_retry(&err);
+                    last_error = Some(err);
+                    if retry && attempt < MAX_RETRIES {
+                        thread::sleep(retry_delay(attempt));
+                        continue;
+                    }
+                    return Err(SummarizeError::Network(format!("{}", last_error.unwrap())));
+                }
+            }
+        }
+
+        let raw = raw_body.ok_or_else(|| {
+            SummarizeError::Network(
+                last_error
+                    .map(|err| err.to_string())
+                    .unwrap_or_else(|| "openrouter request failed".to_string()),
+            )
+        })?;
 
         let content = Self::parse_response(raw.trim())?;
         if !content.is_empty() {
@@ -110,6 +143,7 @@ struct OpenRouterMessage {
 #[cfg(test)]
 mod tests {
     use super::OpenRouterProvider;
+    use crate::http::default_agent;
 
     #[test]
     fn parse_response_extracts_content() {
@@ -124,6 +158,7 @@ mod tests {
             model: "test-model".to_string(),
             base_url: "http://example.com".to_string(),
             api_key: "test-key".to_string(),
+            agent: default_agent(),
         };
         let body = provider.build_request_body("prompt");
         let model = body.get("model").and_then(|value| value.as_str());

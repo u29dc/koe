@@ -1,20 +1,24 @@
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 
 use serde::Deserialize;
 use ureq::unversioned::multipart::{Form, Part};
 
+use crate::http::{default_agent, retry_delay, should_retry};
 use crate::{AudioChunk, TranscribeError, TranscriptSegment};
 
 use super::{TranscribeProvider, encode_wav};
 
 const GROQ_TRANSCRIPTIONS_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 const DEFAULT_MODEL: &str = "whisper-large-v3-turbo";
+const MAX_RETRIES: usize = 2;
 
 /// Cloud transcribe provider using the Groq Whisper API.
 pub struct GroqProvider {
     api_key: String,
     model: String,
     segment_id: AtomicU64,
+    agent: ureq::Agent,
 }
 
 #[derive(Deserialize)]
@@ -41,6 +45,7 @@ impl GroqProvider {
             api_key,
             model: model.unwrap_or(DEFAULT_MODEL).to_owned(),
             segment_id: AtomicU64::new(0),
+            agent: default_agent(),
         })
     }
 }
@@ -56,27 +61,56 @@ impl TranscribeProvider for GroqProvider {
     ) -> Result<Vec<TranscriptSegment>, TranscribeError> {
         let wav_data = encode_wav(&chunk.pcm_mono_f32, chunk.sample_rate_hz);
 
-        let form = Form::new()
-            .text("model", self.model.as_str())
-            .text("response_format", "verbose_json")
-            .text("language", "en")
-            .part(
-                "file",
-                Part::bytes(&wav_data)
-                    .file_name("audio.wav")
-                    .mime_str("audio/wav")
-                    .map_err(|e| TranscribeError::Network(format!("{e}")))?,
-            );
+        let mut last_error: Option<ureq::Error> = None;
+        let mut groq: Option<GroqResponse> = None;
 
-        let response = ureq::post(GROQ_TRANSCRIPTIONS_URL)
-            .header("Authorization", &format!("Bearer {}", self.api_key))
-            .send(form)
-            .map_err(|e| TranscribeError::Network(format!("{e}")))?;
+        for attempt in 0..=MAX_RETRIES {
+            let form = Form::new()
+                .text("model", self.model.as_str())
+                .text("response_format", "verbose_json")
+                .text("language", "en")
+                .part(
+                    "file",
+                    Part::bytes(&wav_data)
+                        .file_name("audio.wav")
+                        .mime_str("audio/wav")
+                        .map_err(|e| TranscribeError::Network(format!("{e}")))?,
+                );
 
-        let groq: GroqResponse = response
-            .into_body()
-            .read_json()
-            .map_err(|e| TranscribeError::InvalidResponse(format!("{e}")))?;
+            let response = self
+                .agent
+                .post(GROQ_TRANSCRIPTIONS_URL)
+                .header("Authorization", &format!("Bearer {}", self.api_key))
+                .send(form);
+
+            match response {
+                Ok(resp) => {
+                    let payload: GroqResponse = resp
+                        .into_body()
+                        .read_json()
+                        .map_err(|e| TranscribeError::InvalidResponse(format!("{e}")))?;
+                    groq = Some(payload);
+                    break;
+                }
+                Err(err) => {
+                    let retry = should_retry(&err);
+                    last_error = Some(err);
+                    if retry && attempt < MAX_RETRIES {
+                        thread::sleep(retry_delay(attempt));
+                        continue;
+                    }
+                    return Err(TranscribeError::Network(format!("{}", last_error.unwrap())));
+                }
+            }
+        }
+
+        let groq = groq.ok_or_else(|| {
+            TranscribeError::Network(
+                last_error
+                    .map(|err| err.to_string())
+                    .unwrap_or_else(|| "groq request failed".to_string()),
+            )
+        })?;
 
         let base_ms = (chunk.start_pts_ns / 1_000_000) as i64;
 

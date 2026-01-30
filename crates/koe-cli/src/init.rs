@@ -3,11 +3,18 @@ use clap::Args;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 use thiserror::Error;
 
 pub const DEFAULT_WHISPER_MODEL: &str = "base.en";
 const DEFAULT_GROQ_MODEL: &str = "whisper-large-v3-turbo";
 const MODEL_BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+const DOWNLOAD_MAX_RETRIES: usize = 2;
+const DOWNLOAD_RETRY_BASE_MS: u64 = 500;
+const DOWNLOAD_TIMEOUT_GLOBAL: Duration = Duration::from_secs(600);
+const DOWNLOAD_TIMEOUT_CONNECT: Duration = Duration::from_secs(10);
+const DOWNLOAD_TIMEOUT_RECV_BODY: Duration = Duration::from_secs(600);
 
 struct ModelOption {
     name: &'static str,
@@ -215,10 +222,11 @@ fn prompt_provider(prompt: &str, options: &[&str], current: &str) -> Result<Stri
         if trimmed.is_empty() {
             return Ok(options[default_index].to_string());
         }
-        if let Ok(choice) = trimmed.parse::<usize>() {
-            if choice >= 1 && choice <= options.len() {
-                return Ok(options[choice - 1].to_string());
-            }
+        if let Ok(choice) = trimmed.parse::<usize>()
+            && choice >= 1
+            && choice <= options.len()
+        {
+            return Ok(options[choice - 1].to_string());
         }
         println!("invalid selection, try again");
     }
@@ -245,10 +253,11 @@ fn prompt_model_choice(current: &str) -> Result<String, InitError> {
         if trimmed.is_empty() {
             return Ok(WHISPER_MODELS[default_index].name.to_string());
         }
-        if let Ok(choice) = trimmed.parse::<usize>() {
-            if choice >= 1 && choice <= WHISPER_MODELS.len() {
-                return Ok(WHISPER_MODELS[choice - 1].name.to_string());
-            }
+        if let Ok(choice) = trimmed.parse::<usize>()
+            && choice >= 1
+            && choice <= WHISPER_MODELS.len()
+        {
+            return Ok(WHISPER_MODELS[choice - 1].name.to_string());
         }
         println!("invalid selection, try again");
     }
@@ -470,15 +479,70 @@ fn model_filename(model: &str) -> String {
 }
 
 fn download_to_path(url: &str, dest: &Path) -> Result<(), InitError> {
-    let response = ureq::get(url)
-        .call()
-        .map_err(|e| InitError::Message(format!("model download failed: {e}")))?;
+    let agent = download_agent();
+    let mut last_error: Option<ureq::Error> = None;
 
-    let tmp_path = dest.with_extension("download");
-    let mut reader = response.into_body().into_reader();
-    let mut file = File::create(&tmp_path)?;
-    io::copy(&mut reader, &mut file)?;
-    file.sync_all()?;
-    fs::rename(tmp_path, dest)?;
-    Ok(())
+    for attempt in 0..=DOWNLOAD_MAX_RETRIES {
+        let response = agent.get(url).call();
+        match response {
+            Ok(resp) => {
+                let tmp_path = dest.with_extension("download");
+                if tmp_path.exists() {
+                    let _ = fs::remove_file(&tmp_path);
+                }
+                let mut reader = resp.into_body().into_reader();
+                let mut file = File::create(&tmp_path)?;
+                io::copy(&mut reader, &mut file)?;
+                file.sync_all()?;
+                fs::rename(tmp_path, dest)?;
+                return Ok(());
+            }
+            Err(err) => {
+                let retry = should_retry_download(&err);
+                last_error = Some(err);
+                if retry && attempt < DOWNLOAD_MAX_RETRIES {
+                    thread::sleep(download_retry_delay(attempt));
+                    continue;
+                }
+                return Err(InitError::Message(format!(
+                    "model download failed: {}",
+                    last_error.unwrap()
+                )));
+            }
+        }
+    }
+
+    Err(InitError::Message(
+        last_error
+            .map(|err| format!("model download failed: {err}"))
+            .unwrap_or_else(|| "model download failed".into()),
+    ))
+}
+
+fn download_agent() -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(DOWNLOAD_TIMEOUT_GLOBAL))
+        .timeout_connect(Some(DOWNLOAD_TIMEOUT_CONNECT))
+        .timeout_recv_body(Some(DOWNLOAD_TIMEOUT_RECV_BODY))
+        .build();
+    config.into()
+}
+
+fn should_retry_download(err: &ureq::Error) -> bool {
+    match err {
+        ureq::Error::StatusCode(code) => *code == 429 || (500..=599).contains(code),
+        ureq::Error::Timeout(_)
+        | ureq::Error::Io(_)
+        | ureq::Error::HostNotFound
+        | ureq::Error::ConnectionFailed
+        | ureq::Error::TooManyRedirects
+        | ureq::Error::RedirectFailed => true,
+        _ => false,
+    }
+}
+
+fn download_retry_delay(attempt: usize) -> Duration {
+    let shift = attempt.min(6) as u32;
+    let delay = DOWNLOAD_RETRY_BASE_MS.saturating_mul(1_u64 << shift);
+    Duration::from_millis(delay)
 }
