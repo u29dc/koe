@@ -375,3 +375,60 @@ fn format_timestamp(ms: i64) -> String {
     let seconds = total_seconds % 60;
     format!("{minutes:02}:{seconds:02}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionHandle, SessionMetadata, SessionMetadataInput};
+    use crate::config::ConfigPaths;
+    use koe_core::types::{MeetingState, NoteItem, TranscriptSegment};
+    use tempfile::tempdir;
+
+    #[test]
+    fn export_on_exit_writes_transcript_and_notes() {
+        let temp = tempdir().unwrap();
+        let paths = ConfigPaths::from_base(temp.path().join("koe"));
+        let metadata = SessionMetadata::new(SessionMetadataInput {
+            context: None,
+            participants: Vec::new(),
+            audio_sample_rate_hz: 48_000,
+            audio_channels: 1,
+            audio_sources: vec!["system".to_string()],
+            asr_provider: "whisper".to_string(),
+            asr_model: "base.en".to_string(),
+            summarizer_provider: "ollama".to_string(),
+            summarizer_model: "qwen3:30b-a3b".to_string(),
+        })
+        .unwrap();
+        let session_id = metadata.id.clone();
+        let notes_file = metadata.notes_file.clone();
+
+        let mut session = SessionHandle::start(&paths, metadata, None).unwrap();
+
+        let segments = vec![TranscriptSegment {
+            id: 1,
+            start_ms: 0,
+            end_ms: 1_000,
+            speaker: Some("Me".to_string()),
+            text: "hello".to_string(),
+            finalized: true,
+        }];
+        let mut state = MeetingState::default();
+        state.key_points.push(NoteItem {
+            id: "k1".to_string(),
+            text: "first point".to_string(),
+            evidence: vec![1],
+        });
+
+        session.export_on_exit(&segments, &state).unwrap();
+
+        let session_dir = paths.sessions_dir.join(session_id);
+        let transcript_md = std::fs::read_to_string(session_dir.join("transcript.md")).unwrap();
+        assert!(transcript_md.contains("hello"));
+
+        let notes_path = session_dir.join(notes_file);
+        let notes_json = std::fs::read_to_string(notes_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&notes_json).unwrap();
+        assert!(parsed.get("updated_at").is_some());
+        assert!(parsed.get("state").is_some());
+    }
+}
