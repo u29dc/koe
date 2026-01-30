@@ -339,8 +339,10 @@ Phase 4: Latency comparison + polish
 - Smoke tests:
     - [ ] Compare local vs cloud latency over a 3-minute session.
         - Run a controlled session with both providers and record average latency. Use the status bar metrics to compare and document the result. If results vary, capture network conditions for context.
+        - BLOCKED: Requires a live audio session with local and cloud ASR plus manual timing; cannot run interactive 3-minute capture here; tried only code-level checks; next steps: run `bun run koe`, switch providers, speak continuously for 3 minutes each, record status bar lag metrics; file refs: `crates/koe-cli/src/tui.rs`, `crates/koe-cli/src/main.rs`.
     - [ ] Kill the process mid-session and confirm recovery files exist.
         - Verify audio, transcript, notes, and metadata are present and readable, with `finalized=false`.
+        - BLOCKED: Requires an interactive session and forced termination to inspect on-disk artifacts; cannot run or kill interactive process here; tried only code-level persistence checks; next steps: start `bun run koe`, speak for 1–2 minutes, kill process, confirm `~/.koe/sessions/{id}` contains `audio.raw`, `transcript.jsonl`, `notes.json`, `metadata.toml` with `finalized=false`; file refs: `crates/koe-cli/src/session.rs`.
     - [ ] Export produces valid transcript.md and notes.json.
         - Validate the output format with a simple parser or quick manual check. Ensure files include metadata like timestamps or session ID if desired. Confirm the export does not include partial or duplicated entries.
 
