@@ -75,13 +75,29 @@ fn main() {
 
     let model_trn_env = std::env::var("KOE_WHISPER_MODEL").ok();
     let model_groq_env = std::env::var("KOE_GROQ_MODEL").ok();
-    let model_trn = if run.asr == "groq" {
-        run.model_trn.as_deref().or(model_groq_env.as_deref())
+    let mut model_trn_owned = if run.asr == "groq" {
+        run.model_trn.clone().or(model_groq_env)
     } else {
-        run.model_trn.as_deref().or(model_trn_env.as_deref())
+        run.model_trn.clone().or(model_trn_env)
     };
 
-    let mut asr = match create_asr(run.asr.as_str(), model_trn) {
+    if run.asr == "whisper" && model_trn_owned.is_none() {
+        let init_args = init::InitArgs {
+            model: "base.en".to_string(),
+            dir: None,
+            force: false,
+            groq_key: None,
+        };
+        match init::run(&init_args) {
+            Ok(path) => model_trn_owned = Some(path.to_string_lossy().to_string()),
+            Err(e) => {
+                eprintln!("init failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let mut asr = match create_asr(run.asr.as_str(), model_trn_owned.as_deref()) {
         Ok(provider) => provider,
         Err(e) => {
             eprintln!("asr init failed: {e}");
