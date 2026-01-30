@@ -63,7 +63,12 @@ pub fn run(args: &ConfigArgs, paths: &ConfigPaths) -> Result<(), ConfigError> {
 fn edit_config(paths: &ConfigPaths) -> Result<(), ConfigError> {
     let editor = std::env::var("EDITOR")
         .map_err(|_| ConfigError::Validation("$EDITOR not set; use --set or set EDITOR".into()))?;
-    let status = Command::new(editor)
+    let parts = split_editor_command(&editor)?;
+    let (program, args) = parts
+        .split_first()
+        .ok_or_else(|| ConfigError::Validation("$EDITOR is empty".into()))?;
+    let status = Command::new(program)
+        .args(args)
         .arg(&paths.config_path)
         .status()
         .map_err(ConfigError::Io)?;
@@ -73,6 +78,52 @@ fn edit_config(paths: &ConfigPaths) -> Result<(), ConfigError> {
         ));
     }
     Ok(())
+}
+
+fn split_editor_command(editor: &str) -> Result<Vec<String>, ConfigError> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = editor.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            '\\' if !in_single => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            ch if ch.is_whitespace() && !in_single && !in_double => {
+                if !current.is_empty() {
+                    parts.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if in_single || in_double {
+        return Err(ConfigError::Validation(
+            "$EDITOR has unmatched quotes".into(),
+        ));
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+
+    if parts.is_empty() {
+        return Err(ConfigError::Validation("$EDITOR is empty".into()));
+    }
+
+    Ok(parts)
 }
 
 fn list_audio_inputs() {
@@ -343,4 +394,27 @@ fn parse_participants(value: &str) -> Result<Vec<String>, ConfigError> {
         ));
     }
     Ok(participants)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_editor_command;
+
+    #[test]
+    fn split_editor_command_handles_args() {
+        let parts = split_editor_command("code --wait").unwrap();
+        assert_eq!(parts, vec!["code", "--wait"]);
+    }
+
+    #[test]
+    fn split_editor_command_handles_quotes() {
+        let parts = split_editor_command("\"/Applications/VS Code\" --wait").unwrap();
+        assert_eq!(parts, vec!["/Applications/VS Code", "--wait"]);
+    }
+
+    #[test]
+    fn split_editor_command_rejects_unmatched_quotes() {
+        let err = split_editor_command("\"unterminated").unwrap_err();
+        assert!(err.to_string().contains("unmatched quotes"));
+    }
 }
