@@ -3,7 +3,10 @@
 	"version": "0.0.1",
 	"type": "module",
 	"private": true,
-	"repository": { "type": "git", "url": "https://github.com/u29dc/koe" },
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/u29dc/koe"
+	},
 	"scripts": {
 		"init---------------------------------": "",
 		"prepare": "husky",
