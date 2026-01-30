@@ -114,6 +114,9 @@ fn apply_set(config: &mut Config, assignment: &str) -> Result<(), ConfigError> {
         "summarizer.prompt_profile" => {
             config.summarizer.prompt_profile = value.to_string();
         }
+        "session.context" => {
+            config.session.context = value.to_string();
+        }
         "ui.show_transcript" => {
             config.ui.show_transcript = parse_bool(value, key)?;
         }

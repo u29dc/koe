@@ -57,6 +57,7 @@ pub struct Config {
     pub audio: AudioConfig,
     pub asr: AsrConfig,
     pub summarizer: SummarizerConfig,
+    pub session: SessionConfig,
     pub ui: UiConfig,
 }
 
@@ -67,6 +68,7 @@ impl Default for Config {
             audio: AudioConfig::default(),
             asr: AsrConfig::default(),
             summarizer: SummarizerConfig::default(),
+            session: SessionConfig::default(),
             ui: UiConfig::default(),
         }
     }
@@ -126,6 +128,12 @@ impl Default for SummarizerConfig {
             prompt_profile: "minimal".to_string(),
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionConfig {
+    pub context: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
