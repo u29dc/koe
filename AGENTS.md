@@ -262,7 +262,7 @@ Phase 2: ASR + transcript ledger + TUI
         - Keep palette minimal and readable; avoid bright or noisy styling. Ensure colors remain legible in common terminal themes.
     - [x] TUI clean shutdown restores terminal even on panic.
         - Maintain existing panic hook and ensure all threads stop cleanly on exit.
-    - [ ] Meeting context can be provided via CLI, config, or TUI and is passed to the summarizer.
+    - [x] Meeting context can be provided via CLI, config, or TUI and is passed to the summarizer.
         - Support `--context`, config default (`session.context`), and an in-TUI edit action; pick a single canonical source with clear precedence (CLI > TUI > config).
         - Context should be stored in session metadata (`metadata.toml`) and injected into summarizer prompts; allow empty/absent context.
         - Support multi-line context; preserve verbatim and redact from logs unless explicitly printed.
