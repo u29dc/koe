@@ -38,9 +38,9 @@ pub enum ProcessError {
     Capture(#[from] CaptureError),
 }
 
-/// Errors from ASR providers.
+/// Errors from transcribe providers.
 #[derive(Debug, Error)]
-pub enum AsrError {
+pub enum TranscribeError {
     #[error("model load failed: {0}")]
     ModelLoad(String),
 
@@ -54,10 +54,10 @@ pub enum AsrError {
     InvalidResponse(String),
 }
 
-/// Errors from summarizer providers.
+/// Errors from summarize providers.
 #[derive(Debug, Error)]
-pub enum SummarizerError {
-    #[error("summarization failed: {0}")]
+pub enum SummarizeError {
+    #[error("summarize failed: {0}")]
     Failed(String),
 
     #[error("network error: {0}")]

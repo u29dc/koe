@@ -18,7 +18,7 @@ pub enum AudioSource {
     Mixed,
 }
 
-/// A speech-gated chunk of resampled 16 kHz mono PCM ready for ASR.
+/// A speech-gated chunk of resampled 16 kHz mono PCM ready for transcription.
 pub struct AudioChunk {
     pub source: AudioSource,
     pub start_pts_ns: i128,
@@ -26,7 +26,7 @@ pub struct AudioChunk {
     pub pcm_mono_f32: Vec<f32>,
 }
 
-/// A single transcript segment produced by ASR.
+/// A single transcript segment produced by transcription.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptSegment {
     pub id: u64,
@@ -96,8 +96,8 @@ pub struct NotesPatch {
     pub ops: Vec<NotesOp>,
 }
 
-/// Events emitted by a summarizer provider during streaming.
-pub enum SummarizerEvent {
+/// Events emitted by a summarize provider during streaming.
+pub enum SummarizeEvent {
     DraftToken(String),
     PatchReady(NotesPatch),
 }

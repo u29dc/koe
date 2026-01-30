@@ -2,20 +2,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-use crate::{AsrError, AudioChunk, TranscriptSegment};
+use crate::{AudioChunk, TranscribeError, TranscriptSegment};
 
-use super::AsrProvider;
+use super::TranscribeProvider;
 
-/// Local ASR provider using whisper.cpp via whisper-rs with Metal acceleration.
+/// Local transcribe provider using whisper.cpp via whisper-rs with Metal acceleration.
 pub struct WhisperProvider {
     ctx: WhisperContext,
     segment_id: AtomicU64,
 }
 
 impl WhisperProvider {
-    pub fn new(model_path: &str) -> Result<Self, AsrError> {
+    pub fn new(model_path: &str) -> Result<Self, TranscribeError> {
         let ctx = WhisperContext::new_with_params(model_path, WhisperContextParameters::new())
-            .map_err(|e| AsrError::ModelLoad(format!("{e}")))?;
+            .map_err(|e| TranscribeError::ModelLoad(format!("{e}")))?;
         Ok(Self {
             ctx,
             segment_id: AtomicU64::new(0),
@@ -23,16 +23,19 @@ impl WhisperProvider {
     }
 }
 
-impl AsrProvider for WhisperProvider {
+impl TranscribeProvider for WhisperProvider {
     fn name(&self) -> &'static str {
         "whisper"
     }
 
-    fn transcribe(&mut self, chunk: &AudioChunk) -> Result<Vec<TranscriptSegment>, AsrError> {
+    fn transcribe(
+        &mut self,
+        chunk: &AudioChunk,
+    ) -> Result<Vec<TranscriptSegment>, TranscribeError> {
         let mut state = self
             .ctx
             .create_state()
-            .map_err(|e| AsrError::TranscribeFailed(format!("{e}")))?;
+            .map_err(|e| TranscribeError::TranscribeFailed(format!("{e}")))?;
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 5 });
         params.set_language(Some("en"));
@@ -42,7 +45,7 @@ impl AsrProvider for WhisperProvider {
 
         state
             .full(params, &chunk.pcm_mono_f32)
-            .map_err(|e| AsrError::TranscribeFailed(format!("{e}")))?;
+            .map_err(|e| TranscribeError::TranscribeFailed(format!("{e}")))?;
 
         let base_ms = (chunk.start_pts_ns / 1_000_000) as i64;
         let n_segments = state.full_n_segments();

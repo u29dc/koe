@@ -1,8 +1,8 @@
-pub mod asr;
 pub mod capture;
 pub mod error;
 pub mod process;
-pub mod summarizer;
+pub mod summarize;
+pub mod transcribe;
 pub mod transcript;
 pub mod types;
 

@@ -1,9 +1,9 @@
-use crate::SummarizerError;
-use crate::types::{MeetingState, SummarizerEvent, TranscriptSegment};
+use crate::SummarizeError;
+use crate::types::{MeetingState, SummarizeEvent, TranscriptSegment};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{SummarizerProvider, patch};
+use super::{SummarizeProvider, patch};
 
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_MODEL: &str = "google/gemini-2.5-flash";
@@ -17,9 +17,12 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
-    pub fn new(model: Option<&str>) -> Result<Self, SummarizerError> {
-        let api_key = std::env::var("OPENROUTER_API_KEY")
-            .map_err(|_| SummarizerError::Failed("OPENROUTER_API_KEY not set".into()))?;
+    pub fn new(model: Option<&str>, api_key: Option<&str>) -> Result<Self, SummarizeError> {
+        let api_key = api_key
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| SummarizeError::Failed("cloud API key not set".into()))?
+            .to_string();
         let base_url =
             std::env::var("OPENROUTER_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.into());
         Ok(Self {
@@ -40,19 +43,19 @@ impl OpenRouterProvider {
         })
     }
 
-    fn parse_response(body: &str) -> Result<String, SummarizerError> {
+    fn parse_response(body: &str) -> Result<String, SummarizeError> {
         let response: OpenRouterResponse = serde_json::from_str(body)
-            .map_err(|e| SummarizerError::InvalidResponse(e.to_string()))?;
+            .map_err(|e| SummarizeError::InvalidResponse(e.to_string()))?;
         let choice = response
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| SummarizerError::InvalidResponse("no choices".into()))?;
+            .ok_or_else(|| SummarizeError::InvalidResponse("no choices".into()))?;
         Ok(choice.message.content)
     }
 }
 
-impl SummarizerProvider for OpenRouterProvider {
+impl SummarizeProvider for OpenRouterProvider {
     fn name(&self) -> &'static str {
         "openrouter"
     }
@@ -63,8 +66,8 @@ impl SummarizerProvider for OpenRouterProvider {
         state: &MeetingState,
         context: Option<&str>,
         participants: &[String],
-        on_event: &mut dyn FnMut(SummarizerEvent),
-    ) -> Result<(), SummarizerError> {
+        on_event: &mut dyn FnMut(SummarizeEvent),
+    ) -> Result<(), SummarizeError> {
         let prompt = patch::build_prompt(recent_segments, state, context, participants);
         let url = format!("{}/chat/completions", self.base_url);
         let body = self.build_request_body(&prompt);
@@ -72,19 +75,19 @@ impl SummarizerProvider for OpenRouterProvider {
         let response = ureq::post(&url)
             .header("Authorization", &format!("Bearer {}", self.api_key))
             .send_json(body)
-            .map_err(|e| SummarizerError::Network(format!("{e}")))?;
+            .map_err(|e| SummarizeError::Network(format!("{e}")))?;
 
         let raw = response
             .into_body()
             .read_to_string()
-            .map_err(|e| SummarizerError::Network(format!("{e}")))?;
+            .map_err(|e| SummarizeError::Network(format!("{e}")))?;
 
         let content = Self::parse_response(raw.trim())?;
         if !content.is_empty() {
-            on_event(SummarizerEvent::DraftToken(content.clone()));
+            on_event(SummarizeEvent::DraftToken(content.clone()));
         }
         let patch = patch::parse_patch(content.trim())?;
-        on_event(SummarizerEvent::PatchReady(patch));
+        on_event(SummarizeEvent::PatchReady(patch));
         Ok(())
     }
 }

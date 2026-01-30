@@ -1,4 +1,4 @@
-use crate::SummarizerError;
+use crate::SummarizeError;
 use crate::types::{MeetingState, NotesOp, NotesPatch, TranscriptSegment};
 use serde::Deserialize;
 
@@ -43,15 +43,15 @@ pub(crate) fn build_prompt(
     )
 }
 
-pub(crate) fn parse_patch(output: &str) -> Result<NotesPatch, SummarizerError> {
+pub(crate) fn parse_patch(output: &str) -> Result<NotesPatch, SummarizeError> {
     if let Ok(payload) = serde_json::from_str::<PatchPayload>(output) {
         return Ok(payload.into_patch());
     }
 
     let json = extract_json_object(output)
-        .ok_or_else(|| SummarizerError::InvalidResponse("no json object found".into()))?;
+        .ok_or_else(|| SummarizeError::InvalidResponse("no json object found".into()))?;
     let payload: PatchPayload =
-        serde_json::from_str(json).map_err(|e| SummarizerError::InvalidResponse(e.to_string()))?;
+        serde_json::from_str(json).map_err(|e| SummarizeError::InvalidResponse(e.to_string()))?;
     Ok(payload.into_patch())
 }
 

@@ -3,14 +3,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Deserialize;
 use ureq::unversioned::multipart::{Form, Part};
 
-use crate::{AsrError, AudioChunk, TranscriptSegment};
+use crate::{AudioChunk, TranscribeError, TranscriptSegment};
 
-use super::{AsrProvider, encode_wav};
+use super::{TranscribeProvider, encode_wav};
 
 const GROQ_TRANSCRIPTIONS_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 const DEFAULT_MODEL: &str = "whisper-large-v3-turbo";
 
-/// Cloud ASR provider using the Groq Whisper API.
+/// Cloud transcribe provider using the Groq Whisper API.
 pub struct GroqProvider {
     api_key: String,
     model: String,
@@ -31,9 +31,12 @@ struct GroqSegment {
 }
 
 impl GroqProvider {
-    pub fn new(model: Option<&str>) -> Result<Self, AsrError> {
-        let api_key = std::env::var("GROQ_API_KEY")
-            .map_err(|_| AsrError::ModelLoad("GROQ_API_KEY not set".into()))?;
+    pub fn new(model: Option<&str>, api_key: Option<&str>) -> Result<Self, TranscribeError> {
+        let api_key = api_key
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| TranscribeError::ModelLoad("cloud API key not set".into()))?
+            .to_string();
         Ok(Self {
             api_key,
             model: model.unwrap_or(DEFAULT_MODEL).to_owned(),
@@ -42,12 +45,15 @@ impl GroqProvider {
     }
 }
 
-impl AsrProvider for GroqProvider {
+impl TranscribeProvider for GroqProvider {
     fn name(&self) -> &'static str {
         "groq"
     }
 
-    fn transcribe(&mut self, chunk: &AudioChunk) -> Result<Vec<TranscriptSegment>, AsrError> {
+    fn transcribe(
+        &mut self,
+        chunk: &AudioChunk,
+    ) -> Result<Vec<TranscriptSegment>, TranscribeError> {
         let wav_data = encode_wav(&chunk.pcm_mono_f32, chunk.sample_rate_hz);
 
         let form = Form::new()
@@ -59,18 +65,18 @@ impl AsrProvider for GroqProvider {
                 Part::bytes(&wav_data)
                     .file_name("audio.wav")
                     .mime_str("audio/wav")
-                    .map_err(|e| AsrError::Network(format!("{e}")))?,
+                    .map_err(|e| TranscribeError::Network(format!("{e}")))?,
             );
 
         let response = ureq::post(GROQ_TRANSCRIPTIONS_URL)
             .header("Authorization", &format!("Bearer {}", self.api_key))
             .send(form)
-            .map_err(|e| AsrError::Network(format!("{e}")))?;
+            .map_err(|e| TranscribeError::Network(format!("{e}")))?;
 
         let groq: GroqResponse = response
             .into_body()
             .read_json()
-            .map_err(|e| AsrError::InvalidResponse(format!("{e}")))?;
+            .map_err(|e| TranscribeError::InvalidResponse(format!("{e}")))?;
 
         let base_ms = (chunk.start_pts_ns / 1_000_000) as i64;
 

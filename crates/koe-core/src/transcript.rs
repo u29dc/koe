@@ -6,7 +6,7 @@ const SIMILARITY_THRESHOLD: f64 = 0.5;
 /// Ordered ledger of transcript segments with overlap-aware deduplication.
 ///
 /// The audio chunker retains a 1s overlap between consecutive emits, so
-/// consecutive ASR calls may produce segments covering the same audio.
+/// consecutive transcribe calls may produce segments covering the same audio.
 /// `append` merges incoming segments against existing ones using temporal
 /// overlap and text similarity to decide whether to replace or keep both.
 pub struct TranscriptLedger {
@@ -22,7 +22,7 @@ impl TranscriptLedger {
         }
     }
 
-    /// Merge new ASR output into the ledger, deduplicating overlaps and
+    /// Merge new transcription output into the ledger, deduplicating overlaps and
     /// finalizing old segments that fall outside the overlap window.
     pub fn append(&mut self, mut incoming: Vec<TranscriptSegment>) {
         incoming.sort_by_key(|s| s.start_ms);
@@ -86,7 +86,7 @@ impl TranscriptLedger {
         }
     }
 
-    /// Tail slice for summarizer context window.
+    /// Tail slice for summarize context window.
     pub fn last_n_segments(&self, n: usize) -> &[TranscriptSegment] {
         let start = self.segments.len().saturating_sub(n);
         &self.segments[start..]

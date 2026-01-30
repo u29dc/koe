@@ -1,33 +1,38 @@
 pub mod groq;
 pub mod whisper;
 
-use crate::{AsrError, AudioChunk, TranscriptSegment};
+use crate::{AudioChunk, TranscribeError, TranscriptSegment};
 
 /// Speech-to-text provider abstraction.
-pub trait AsrProvider: Send {
+pub trait TranscribeProvider: Send {
     fn name(&self) -> &'static str;
-    fn transcribe(&mut self, chunk: &AudioChunk) -> Result<Vec<TranscriptSegment>, AsrError>;
+    fn transcribe(&mut self, chunk: &AudioChunk)
+    -> Result<Vec<TranscriptSegment>, TranscribeError>;
 }
 
-/// Create an ASR provider by name.
+/// Create a transcribe provider by name.
 ///
 /// - `"whisper"` requires `model` pointing to a GGML model file path.
-/// - `"groq"` reads `GROQ_API_KEY` from the environment; `model` selects the
-///   Groq model name (defaults to `whisper-large-v3-turbo`).
-pub fn create_asr(provider: &str, model: Option<&str>) -> Result<Box<dyn AsrProvider>, AsrError> {
+/// - `"groq"` requires an API key; `model` selects the Groq model name
+///   (defaults to `whisper-large-v3-turbo`).
+pub fn create_transcribe_provider(
+    provider: &str,
+    model: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<Box<dyn TranscribeProvider>, TranscribeError> {
     match provider {
         "whisper" => {
             let path = model.ok_or_else(|| {
-                AsrError::ModelLoad(
-                    "model path required for whisper provider (--model-trn /path/to/ggml-*.bin)"
+                TranscribeError::ModelLoad(
+                    "model path required for whisper provider (--transcribe-model /path/to/ggml-*.bin)"
                         .into(),
                 )
             })?;
             Ok(Box::new(whisper::WhisperProvider::new(path)?))
         }
-        "groq" => Ok(Box::new(groq::GroqProvider::new(model)?)),
-        other => Err(AsrError::ModelLoad(format!(
-            "unknown ASR provider: {other}"
+        "groq" => Ok(Box::new(groq::GroqProvider::new(model, api_key)?)),
+        other => Err(TranscribeError::ModelLoad(format!(
+            "unknown transcribe provider: {other}"
         ))),
     }
 }
