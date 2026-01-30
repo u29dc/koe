@@ -29,6 +29,7 @@ ureq = { version = "3.1.4", features = ["json", "multipart"] }
 # Serialization
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+toml = "0.8.20"
 
 # Env
 dotenvy = "0.15.7"

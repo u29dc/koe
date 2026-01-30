@@ -1,7 +1,9 @@
+mod config;
 mod init;
 mod tui;
 
 use clap::{Parser, Subcommand};
+use config::{Config, ConfigPaths};
 use koe_core::asr::{AsrProvider, create_asr};
 use koe_core::capture::create_capture;
 use koe_core::process::ChunkRecvTimeoutError;
@@ -29,25 +31,80 @@ enum Command {
 #[derive(Parser, Debug, Clone)]
 struct RunArgs {
     /// ASR provider: whisper or groq
-    #[arg(long, default_value = "whisper")]
-    asr: String,
+    #[arg(long)]
+    asr: Option<String>,
 
     /// Transcriber model. whisper: path to GGML file, groq: model name [default: whisper-large-v3-turbo]
     #[arg(long)]
     model_trn: Option<String>,
 
     /// Summarizer provider: ollama or openrouter
-    #[arg(long, default_value = "ollama")]
-    summarizer: String,
+    #[arg(long)]
+    summarizer: Option<String>,
 
     /// Summarizer model. ollama: model tag [default: qwen3:30b-a3b], openrouter: model id [default: google/gemini-2.5-flash]
     #[arg(long)]
     model_sum: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedRunArgs {
+    asr: String,
+    model_trn: Option<String>,
+    summarizer: String,
+    model_sum: Option<String>,
+}
+
+impl RunArgs {
+    fn resolve(self, config: &Config) -> ResolvedRunArgs {
+        let asr = self.asr.unwrap_or_else(|| config.asr.provider.clone());
+        let summarizer = self
+            .summarizer
+            .unwrap_or_else(|| config.summarizer.provider.clone());
+
+        let config_model_trn = if config.asr.model.trim().is_empty() {
+            None
+        } else {
+            Some(config.asr.model.clone())
+        };
+        let config_model_sum = if config.summarizer.model.trim().is_empty() {
+            None
+        } else {
+            Some(config.summarizer.model.clone())
+        };
+
+        let model_trn = self.model_trn.or(config_model_trn);
+        let model_sum = self.model_sum.or(config_model_sum);
+
+        ResolvedRunArgs {
+            asr,
+            model_trn,
+            summarizer,
+            model_sum,
+        }
+    }
+}
+
 fn main() {
     dotenvy::dotenv().ok();
     let cli = Cli::parse();
+
+    let paths = match ConfigPaths::from_home() {
+        Ok(paths) => paths,
+        Err(err) => {
+            eprintln!("config paths error: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    let config = match Config::load_or_create(&paths) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("config load failed: {err}");
+            std::process::exit(1);
+        }
+    };
+
     if let Some(Command::Init(args)) = cli.command {
         if let Err(e) = init::run(&args) {
             eprintln!("init failed: {e}");
@@ -56,7 +113,8 @@ fn main() {
         return;
     }
 
-    let run = cli.run;
+    let run = cli.run.resolve(&config);
+    apply_config_env(&config, &run);
     let stats = CaptureStats::new();
     let stats_display = stats.clone();
 
@@ -78,11 +136,18 @@ fn main() {
 
     let whisper_model_env = std::env::var("KOE_WHISPER_MODEL").ok();
     let groq_model_env = std::env::var("KOE_GROQ_MODEL").ok();
-    let mut whisper_model = run.model_trn.clone().or(whisper_model_env);
-    let groq_model = run.model_trn.clone().or(groq_model_env);
+    let mut whisper_model = match run.asr.as_str() {
+        "whisper" => run.model_trn.clone().or(whisper_model_env),
+        _ => whisper_model_env,
+    };
+    let groq_model = match run.asr.as_str() {
+        "groq" => run.model_trn.clone().or(groq_model_env),
+        _ => groq_model_env,
+    };
 
     if run.asr == "whisper" {
-        if let Err(e) = ensure_whisper_model(&mut whisper_model) {
+        let hint = run.model_trn.as_deref();
+        if let Err(e) = ensure_whisper_model(&mut whisper_model, hint) {
             eprintln!("init failed: {e}");
             std::process::exit(1);
         }
@@ -129,7 +194,7 @@ fn main() {
 
                             let next_model = match next {
                                 "whisper" => {
-                                    if let Err(e) = ensure_whisper_model(&mut whisper_model) {
+                                    if let Err(e) = ensure_whisper_model(&mut whisper_model, None) {
                                         eprintln!("init failed: {e}");
                                         continue;
                                     }
@@ -217,13 +282,30 @@ fn default_speaker(source: AudioSource) -> Option<&'static str> {
     }
 }
 
-fn ensure_whisper_model(model: &mut Option<String>) -> Result<(), String> {
-    if model.is_some() {
-        return Ok(());
+fn ensure_whisper_model(model: &mut Option<String>, hint: Option<&str>) -> Result<(), String> {
+    let candidate = hint
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .or_else(|| model.clone());
+
+    if let Some(value) = candidate.as_deref() {
+        let is_path = value.ends_with(".bin")
+            || value.contains(std::path::MAIN_SEPARATOR)
+            || value.contains('/');
+        if is_path {
+            let path = std::path::Path::new(value);
+            if path.exists() {
+                *model = Some(value.to_string());
+                return Ok(());
+            }
+            return Err(format!("whisper model not found at {}", path.display()));
+        }
     }
 
+    let model_name = candidate.unwrap_or_else(|| "base.en".to_string());
     let init_args = init::InitArgs {
-        model: "base.en".to_string(),
+        model: model_name,
         dir: None,
         force: false,
         groq_key: None,
@@ -252,6 +334,26 @@ fn transcribe_with_latency(
     let start = Instant::now();
     let segments = asr.transcribe(chunk)?;
     Ok((segments, start.elapsed().as_millis()))
+}
+
+fn apply_config_env(config: &Config, run: &ResolvedRunArgs) {
+    if run.asr == "groq"
+        && !config.asr.api_key.trim().is_empty()
+        && std::env::var("GROQ_API_KEY").is_err()
+    {
+        unsafe {
+            std::env::set_var("GROQ_API_KEY", config.asr.api_key.trim());
+        }
+    }
+    if run.summarizer == "openrouter"
+        && !config.summarizer.api_key.trim().is_empty()
+        && std::env::var("OPENROUTER_API_KEY").is_err()
+    {
+        unsafe {
+            std::env::set_var("OPENROUTER_API_KEY", config.summarizer.api_key.trim());
+        }
+    }
+    let _ = &run.model_sum;
 }
 
 #[cfg(test)]

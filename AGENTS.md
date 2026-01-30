@@ -183,7 +183,7 @@ Phase 0: Quality gate wiring
         - Maintain formatting rules here rather than inline editor settings so that `cargo fmt` is deterministic. If style changes are needed, document them in the plan or a style note. Ensure formatting does not fight the default Rust edition settings.
     - [x] rustfmt and clippy are installed (`rustup component add rustfmt clippy`) (verified via `cargo fmt --version` and `cargo clippy --version`).
         - These are required for `util:format` and `util:lint` to run in a clean environment. Verify by running `rustup component list --installed` or by executing the scripts. If this project is used in CI, make sure the CI image installs these components too.
-    - [ ] Config file lives at `~/.koe/config.toml` with a minimal schema (audio, asr, summarizer, ui) and defaults for local-first.
+    - [x] Config file lives at `~/.koe/config.toml` with a minimal schema (audio, asr, summarizer, ui) and defaults for local-first.
         - Required sections: `[audio]` (sample_rate, channels, sources), `[asr]` (provider, model, api_key), `[summarizer]` (provider, model, api_key, prompt_profile), `[ui]` (show_transcript, notes_only_default, color_theme).
         - Keep all user-facing settings here, including API keys, model choices, and UI toggles. Environment variables may override for CI/dev but are optional for end users.
         - Ensure `~/.koe/` contains `config.toml`, `models/`, and `sessions/` directories with predictable paths.
