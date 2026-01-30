@@ -22,22 +22,29 @@ struct AudioProducer {
     drop_count: Arc<AtomicU64>,
 }
 
-/// RT-safe ScreenCaptureKit output handler.
-/// Copies f32 audio samples into SPSC ring buffers.
-pub struct OutputHandler {
+/// Shared state between system and microphone output handlers.
+struct SharedHandlerState {
     system_producer: Mutex<AudioProducer>,
     mic_producer: Mutex<AudioProducer>,
 }
 
-/// Create an output handler with its paired consumer rings.
-pub fn create_output_handler() -> (OutputHandler, AudioRing, AudioRing) {
+/// RT-safe ScreenCaptureKit output handler.
+/// Copies f32 audio samples into SPSC ring buffers.
+/// Each instance holds a shared reference to the producer state.
+pub struct OutputHandler {
+    state: Arc<SharedHandlerState>,
+}
+
+/// Create a pair of output handlers (system audio + microphone) with their paired consumer rings.
+/// Returns two handlers so each can be registered for a separate `SCStreamOutputType`.
+pub fn create_output_handlers() -> (OutputHandler, OutputHandler, AudioRing, AudioRing) {
     let (sys_samples_prod, sys_samples_cons) = rtrb::RingBuffer::new(RING_CAPACITY);
     let (sys_pts_prod, sys_pts_cons) = rtrb::RingBuffer::new(PTS_RING_CAPACITY);
 
     let (mic_samples_prod, mic_samples_cons) = rtrb::RingBuffer::new(RING_CAPACITY);
     let (mic_pts_prod, mic_pts_cons) = rtrb::RingBuffer::new(PTS_RING_CAPACITY);
 
-    let handler = OutputHandler {
+    let state = Arc::new(SharedHandlerState {
         system_producer: Mutex::new(AudioProducer {
             samples: sys_samples_prod,
             pts: sys_pts_prod,
@@ -48,7 +55,12 @@ pub fn create_output_handler() -> (OutputHandler, AudioRing, AudioRing) {
             pts: mic_pts_prod,
             drop_count: Arc::new(AtomicU64::new(0)),
         }),
+    });
+
+    let system_handler = OutputHandler {
+        state: Arc::clone(&state),
     };
+    let mic_handler = OutputHandler { state };
 
     let system_ring = AudioRing {
         samples: sys_samples_cons,
@@ -60,14 +72,14 @@ pub fn create_output_handler() -> (OutputHandler, AudioRing, AudioRing) {
         pts: mic_pts_cons,
     };
 
-    (handler, system_ring, mic_ring)
+    (system_handler, mic_handler, system_ring, mic_ring)
 }
 
 impl SCStreamOutputTrait for OutputHandler {
     fn did_output_sample_buffer(&self, sample: CMSampleBuffer, of_type: SCStreamOutputType) {
         let mutex = match of_type {
-            SCStreamOutputType::Audio => &self.system_producer,
-            SCStreamOutputType::Microphone => &self.mic_producer,
+            SCStreamOutputType::Audio => &self.state.system_producer,
+            SCStreamOutputType::Microphone => &self.state.mic_producer,
             SCStreamOutputType::Screen => return,
         };
 

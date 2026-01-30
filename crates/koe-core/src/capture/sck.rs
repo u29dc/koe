@@ -19,7 +19,8 @@ pub struct SckCapture {
 
 impl SckCapture {
     pub fn new() -> Result<Self, CaptureError> {
-        let (output_handler, system_ring, mic_ring) = handler::create_output_handler();
+        let (system_handler, mic_handler, system_ring, mic_ring) =
+            handler::create_output_handlers();
 
         // Enumerate displays
         let content =
@@ -43,9 +44,10 @@ impl SckCapture {
             .with_sample_rate(SAMPLE_RATE as i32)
             .with_channel_count(1);
 
-        // Create stream and add output handler
+        // Create stream and add output handlers for system audio and microphone
         let mut stream = SCStream::new(&filter, &config);
-        stream.add_output_handler(output_handler, SCStreamOutputType::Audio);
+        stream.add_output_handler(system_handler, SCStreamOutputType::Audio);
+        stream.add_output_handler(mic_handler, SCStreamOutputType::Microphone);
 
         Ok(Self {
             stream: Some(stream),
