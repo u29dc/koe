@@ -1,6 +1,7 @@
+mod init;
 mod tui;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use koe_core::asr::create_asr;
 use koe_core::capture::create_capture;
 use koe_core::types::{AudioSource, CaptureStats};
@@ -10,6 +11,20 @@ use std::thread;
 #[derive(Parser)]
 #[command(name = "koe", version, about = "meeting transcription engine")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    #[command(flatten)]
+    run: RunArgs,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    Init(init::InitArgs),
+}
+
+#[derive(Parser, Debug, Clone)]
+struct RunArgs {
     /// ASR provider: whisper or groq
     #[arg(long, default_value = "whisper")]
     asr: String,
@@ -30,7 +45,15 @@ struct Cli {
 fn main() {
     dotenvy::dotenv().ok();
     let cli = Cli::parse();
+    if let Some(Command::Init(args)) = cli.command {
+        if let Err(e) = init::run(&args) {
+            eprintln!("init failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
+    let run = cli.run;
     let stats = CaptureStats::new();
     let stats_display = stats.clone();
 
@@ -52,13 +75,13 @@ fn main() {
 
     let model_trn_env = std::env::var("KOE_WHISPER_MODEL").ok();
     let model_groq_env = std::env::var("KOE_GROQ_MODEL").ok();
-    let model_trn = if cli.asr == "groq" {
-        cli.model_trn.as_deref().or(model_groq_env.as_deref())
+    let model_trn = if run.asr == "groq" {
+        run.model_trn.as_deref().or(model_groq_env.as_deref())
     } else {
-        cli.model_trn.as_deref().or(model_trn_env.as_deref())
+        run.model_trn.as_deref().or(model_trn_env.as_deref())
     };
 
-    let mut asr = match create_asr(cli.asr.as_str(), model_trn) {
+    let mut asr = match create_asr(run.asr.as_str(), model_trn) {
         Ok(provider) => provider,
         Err(e) => {
             eprintln!("asr init failed: {e}");
