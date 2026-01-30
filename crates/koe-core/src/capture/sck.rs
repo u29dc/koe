@@ -18,10 +18,15 @@ pub struct SckCapture {
     mic_ring: AudioRing,
     system_pts: PtsTracker,
     mic_pts: PtsTracker,
+    capture_system: bool,
+    capture_microphone: bool,
 }
 
 impl SckCapture {
-    pub fn new(stats: CaptureStats) -> Result<Self, CaptureError> {
+    pub fn new(
+        stats: CaptureStats,
+        capture_config: crate::capture::CaptureConfig,
+    ) -> Result<Self, CaptureError> {
         let (system_handler, mic_handler, system_ring, mic_ring) =
             handler::create_output_handlers(stats);
 
@@ -38,19 +43,31 @@ impl SckCapture {
             .build();
 
         // Configure: mono 48 kHz, audio + microphone, exclude own audio, minimal video
-        let config = SCStreamConfiguration::new()
+        let mut stream_config = SCStreamConfiguration::new()
             .with_width(2)
             .with_height(2)
-            .with_captures_audio(true)
-            .with_captures_microphone(true)
+            .with_captures_audio(capture_config.capture_system)
+            .with_captures_microphone(capture_config.capture_microphone)
             .with_excludes_current_process_audio(true)
             .with_sample_rate(SAMPLE_RATE as i32)
             .with_channel_count(1);
 
+        if capture_config.capture_microphone {
+            if let Some(device_id) = capture_config.microphone_device_id.as_deref() {
+                if !device_id.trim().is_empty() {
+                    stream_config.set_microphone_capture_device_id(device_id);
+                }
+            }
+        }
+
         // Create stream and add output handlers for system audio and microphone
-        let mut stream = SCStream::new(&filter, &config);
-        stream.add_output_handler(system_handler, SCStreamOutputType::Audio);
-        stream.add_output_handler(mic_handler, SCStreamOutputType::Microphone);
+        let mut stream = SCStream::new(&filter, &stream_config);
+        if capture_config.capture_system {
+            stream.add_output_handler(system_handler, SCStreamOutputType::Audio);
+        }
+        if capture_config.capture_microphone {
+            stream.add_output_handler(mic_handler, SCStreamOutputType::Microphone);
+        }
 
         Ok(Self {
             stream: Some(stream),
@@ -58,6 +75,8 @@ impl SckCapture {
             mic_ring,
             system_pts: PtsTracker::new(),
             mic_pts: PtsTracker::new(),
+            capture_system: capture_config.capture_system,
+            capture_microphone: capture_config.capture_microphone,
         })
     }
 
@@ -108,10 +127,16 @@ impl AudioCapture for SckCapture {
     }
 
     fn try_recv_system(&mut self) -> Option<AudioFrame> {
+        if !self.capture_system {
+            return None;
+        }
         Self::drain_ring(&mut self.system_ring, &mut self.system_pts)
     }
 
     fn try_recv_mic(&mut self) -> Option<AudioFrame> {
+        if !self.capture_microphone {
+            return None;
+        }
         Self::drain_ring(&mut self.mic_ring, &mut self.mic_pts)
     }
 }
