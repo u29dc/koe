@@ -1,8 +1,6 @@
-# KOE
+## 1. Documentation
 
 Real-time meeting transcription and notes engine for macOS, built in Rust with ScreenCaptureKit audio capture, VAD-gated chunking, local/cloud transcribe providers (whisper-rs/Groq), and LLM-powered patch-based summary engine (Ollama/OpenRouter), rendered in a ratatui TUI.
-
-## 1. Documentation
 
 - Rust: https://doc.rust-lang.org/std/
 - ratatui: https://docs.rs/ratatui/latest/ratatui/
