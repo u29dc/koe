@@ -207,7 +207,7 @@ Phase 1: Audio capture + chunking
 - Smoke tests:
     - [x] Play system audio and see chunk counters increase.
         - Use a short audio clip and verify both frame and chunk counters increment. Confirm that system audio shows up only in the system pipeline and not the mic stream. This should be repeatable without restarting the process.
-    - [ ] Speak into mic and see separate stream counters increase.
+    - [x] Speak into mic and see separate stream counters increase.
         - Verify mic data flows end-to-end by checking `try_recv_mic` returns frames and the mic pipeline emits chunks. If mic remains silent, re-check output handler registration and permissions. Keep system audio silent while testing mic to avoid cross-talk.
     - [ ] Artificially pause consumer to confirm drops increment.
         - Sleep the processor loop or temporarily stop chunk consumption to force queue backpressure. Confirm chunk drops increment in stats and that the UI reflects the drop count. This test verifies both the queue policy and the visibility of drops.
