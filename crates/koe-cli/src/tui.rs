@@ -1,5 +1,6 @@
 use crate::config::UiConfig;
-use crate::session::SessionHandle;
+use crate::raw_audio::{RawAudioWriter, SharedRawAudioWriter};
+use crate::session::{SessionFactory, SessionHandle};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use koe_core::process::AudioProcessor;
@@ -9,14 +10,17 @@ use koe_core::types::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use std::io;
+use std::io::Write;
+use std::path::Path;
+use std::process::Command;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy)]
 pub enum AsrCommand {
@@ -31,7 +35,63 @@ pub enum UiEvent {
 }
 
 #[derive(Debug, Clone)]
+pub struct AsrModels {
+    whisper: Option<String>,
+    groq: Option<String>,
+}
+
+impl AsrModels {
+    pub fn new(whisper: Option<String>, groq: Option<String>) -> Self {
+        Self { whisper, groq }
+    }
+
+    fn model_for(&self, provider: &str) -> String {
+        match provider {
+            "whisper" => self.whisper.clone().unwrap_or_default(),
+            "groq" => self.groq.clone().unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
+    fn update_model(&mut self, provider: &str, model: String) {
+        match provider {
+            "whisper" => self.whisper = Some(model),
+            "groq" => self.groq = Some(model),
+            _ => {}
+        }
+    }
+
+    fn current_model(&self, provider: &str) -> String {
+        self.model_for(provider)
+    }
+}
+
+pub struct TuiContext {
+    pub processor: AudioProcessor,
+    pub ui_rx: Receiver<UiEvent>,
+    pub stats: CaptureStats,
+    pub asr_name: String,
+    pub asr_cmd_tx: Sender<AsrCommand>,
+    pub ui_config: UiConfig,
+    pub session_factory: SessionFactory,
+    pub shared_writer: SharedRawAudioWriter,
+    pub initial_context: String,
+    pub participants: Vec<String>,
+    pub summarizer_provider: String,
+    pub summarizer_model: String,
+    pub asr_models: AsrModels,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeetingPhase {
+    Idle,
+    MeetingActive,
+    PostMeeting,
+}
+
+#[derive(Debug, Clone)]
 struct UiTheme {
+    accent: Color,
     me: Color,
     them: Color,
     heading: Color,
@@ -47,13 +107,128 @@ impl UiTheme {
 
     fn minimal() -> Self {
         Self {
-            me: Color::Rgb(140, 140, 140),
-            them: Color::Rgb(90, 140, 210),
-            heading: Color::Rgb(120, 120, 120),
-            muted: Color::Rgb(100, 100, 100),
+            accent: Color::Rgb(80, 200, 200),
+            me: Color::Rgb(170, 170, 170),
+            them: Color::Rgb(150, 150, 150),
+            heading: Color::Rgb(140, 140, 140),
+            muted: Color::Rgb(110, 110, 110),
             neutral: Color::Rgb(210, 210, 210),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct PaletteState {
+    filter: String,
+    selected: usize,
+}
+
+impl PaletteState {
+    fn new() -> Self {
+        Self {
+            filter: String::new(),
+            selected: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextInputKind {
+    Context,
+    AsrModel,
+    SummarizerModel,
+}
+
+#[derive(Debug, Clone)]
+struct TextInputState {
+    kind: TextInputKind,
+    buffer: String,
+}
+
+#[derive(Debug, Clone)]
+enum UiMode {
+    Normal,
+    Palette(PaletteState),
+    TextInput(TextInputState),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PaletteCommandId {
+    StartMeeting,
+    EndMeeting,
+    PauseCapture,
+    ResumeCapture,
+    ForceSummarize,
+    SwitchAsrProvider,
+    SwitchSummarizer,
+    SetAsrModel,
+    SetSummarizerModel,
+    EditContext,
+    ToggleTranscript,
+    BrowseSessions,
+    CopyTranscriptPath,
+    CopyNotesPath,
+    CopyAudioPath,
+    OpenSessionFolder,
+    ExportMarkdown,
+    StartNewMeeting,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PaletteCommand {
+    id: PaletteCommandId,
+    label: &'static str,
+    category: &'static str,
+}
+
+struct Waveform {
+    frames: Vec<&'static str>,
+    index: usize,
+    last_tick: Instant,
+}
+
+impl Waveform {
+    fn new() -> Self {
+        Self {
+            frames: vec!["▁▂▃▅▃▂▁", "▂▃▅▃▂▁▂", "▃▅▃▂▁▂▃", "▅▃▂▁▂▃▅"],
+            index: 0,
+            last_tick: Instant::now(),
+        }
+    }
+
+    fn current(&self) -> &'static str {
+        self.frames[self.index % self.frames.len()]
+    }
+
+    fn tick(&mut self) {
+        if self.last_tick.elapsed() >= Duration::from_millis(120) {
+            self.index = (self.index + 1) % self.frames.len();
+            self.last_tick = Instant::now();
+        }
+    }
+}
+
+struct StartMeetingInput<'a> {
+    factory: &'a SessionFactory,
+    shared_writer: &'a SharedRawAudioWriter,
+    asr_provider: &'a str,
+    asr_models: &'a AsrModels,
+    summarizer_provider: &'a str,
+    summarizer_model: &'a str,
+    context: &'a str,
+    participants: &'a [String],
+}
+
+struct FooterState<'a> {
+    phase: MeetingPhase,
+    capture_paused: bool,
+    elapsed: Duration,
+    waveform: &'a Waveform,
+    asr_name: &'a str,
+    asr_connected: bool,
+    asr_lag_ms: Option<u128>,
+    stats: &'a CaptureStats,
+    ledger: &'a TranscriptLedger,
 }
 
 struct TerminalGuard;
@@ -65,36 +240,11 @@ impl Drop for TerminalGuard {
     }
 }
 
-struct ProcessorGuard(Option<AudioProcessor>);
-
-impl ProcessorGuard {
-    fn new(processor: AudioProcessor) -> Self {
-        Self(Some(processor))
-    }
-}
-
-impl Drop for ProcessorGuard {
-    fn drop(&mut self) {
-        if let Some(mut processor) = self.0.take() {
-            processor.stop();
-        }
-    }
-}
-
-pub fn run(
-    processor: AudioProcessor,
-    ui_rx: Receiver<UiEvent>,
-    stats: CaptureStats,
-    asr_name: String,
-    asr_cmd_tx: Sender<AsrCommand>,
-    ui_config: UiConfig,
-    mut session: SessionHandle,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
     crossterm::execute!(stdout, EnterAlternateScreen)?;
     let _terminal_guard = TerminalGuard;
-    let processor_guard = ProcessorGuard::new(processor);
 
     // Panic hook to restore terminal on panic
     let original_hook = std::panic::take_hook();
@@ -106,52 +256,76 @@ pub fn run(
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+
+    let mut processor = ctx.processor;
+    let theme = UiTheme::from_config(&ctx.ui_config);
     let mut ledger = TranscriptLedger::new();
     let mut meeting_state = MeetingState::default();
-    let mut transcript_lines = vec![Line::from("waiting for transcript...")];
-    let mut notes_lines = vec![Line::from("waiting for notes...")];
+    let mut transcript_lines = render_transcript_lines(&ledger, &theme);
+    let mut notes_lines = render_notes_lines(&meeting_state, &theme);
+    let mut asr_name = ctx.asr_name;
     let mut asr_connected = true;
-    let mut transcript_needs_render = false;
-    let mut notes_needs_render = false;
-    let mut asr_name = asr_name;
     let mut asr_lag_ms: Option<u128> = None;
-    let theme = UiTheme::from_config(&ui_config);
-    let mut show_transcript = if ui_config.notes_only_default {
+    let mut show_transcript = if ctx.ui_config.notes_only_default {
         false
     } else {
-        ui_config.show_transcript
+        ctx.ui_config.show_transcript
     };
-    let mut context = session.context().unwrap_or("").to_string();
-    let mut editing_context = false;
-    let mut context_buffer = String::new();
+    let mut phase = MeetingPhase::Idle;
+    let mut mode = UiMode::Normal;
+    let mut meeting_started_at: Option<Instant> = None;
+    let mut meeting_elapsed = Duration::ZERO;
+    let mut capture_paused = true;
+    let mut context = ctx.initial_context.clone();
+    let mut summarizer_provider = ctx.summarizer_provider.clone();
+    let mut summarizer_model = ctx.summarizer_model.clone();
+    let mut asr_models = ctx.asr_models.clone();
+    let mut session: Option<SessionHandle> = None;
+    let mut session_finalized = false;
+    let mut waveform = Waveform::new();
+
+    processor.pause();
 
     loop {
-        // Drain all pending transcript updates
+        // Drain all pending UI events
         loop {
-            match ui_rx.try_recv() {
+            match ctx.ui_rx.try_recv() {
                 Ok(UiEvent::Transcript(segments)) => {
-                    if let Err(err) = session.append_transcript(&segments) {
-                        eprintln!("session transcript write failed: {err}");
+                    if phase == MeetingPhase::MeetingActive && !capture_paused {
+                        if let Some(active_session) = session.as_mut() {
+                            if let Err(err) = active_session.append_transcript(&segments) {
+                                eprintln!("session transcript write failed: {err}");
+                            }
+                        }
+                        ledger.append(segments);
+                        transcript_lines = render_transcript_lines(&ledger, &theme);
                     }
-                    ledger.append(segments);
-                    transcript_needs_render = true;
                 }
                 Ok(UiEvent::NotesPatch(patch)) => {
-                    if apply_notes_patch(&mut meeting_state, patch) {
-                        if let Err(err) = session.write_notes(&meeting_state) {
-                            eprintln!("session notes write failed: {err}");
+                    if phase == MeetingPhase::MeetingActive
+                        && !capture_paused
+                        && apply_notes_patch(&mut meeting_state, patch)
+                    {
+                        if let Some(active_session) = session.as_mut() {
+                            if let Err(err) = active_session.write_notes(&meeting_state) {
+                                eprintln!("session notes write failed: {err}");
+                            }
                         }
-                        notes_needs_render = true;
+                        notes_lines = render_notes_lines(&meeting_state, &theme);
                     }
                 }
                 Ok(UiEvent::AsrStatus { name, connected }) => {
                     asr_name = name;
                     asr_connected = connected;
-                    transcript_needs_render = true;
+                    if let Some(active_session) = session.as_mut() {
+                        let model = asr_models.model_for(&asr_name);
+                        if let Err(err) = active_session.update_asr(asr_name.clone(), model) {
+                            eprintln!("session asr update failed: {err}");
+                        }
+                    }
                 }
                 Ok(UiEvent::AsrLag { last_ms }) => {
                     asr_lag_ms = Some(last_ms);
-                    transcript_needs_render = true;
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -161,152 +335,688 @@ pub fn run(
             }
         }
 
-        if transcript_needs_render {
-            transcript_lines = render_transcript_lines(&ledger, &theme);
-            transcript_needs_render = false;
-        }
-        if notes_needs_render {
-            notes_lines = render_notes_lines(&meeting_state, &theme);
-            notes_needs_render = false;
+        if phase == MeetingPhase::MeetingActive {
+            if let Some(started) = meeting_started_at {
+                meeting_elapsed = started.elapsed();
+            }
         }
 
-        // Render
+        if phase == MeetingPhase::MeetingActive && !capture_paused {
+            waveform.tick();
+        }
+
         terminal.draw(|frame| {
-            let [transcript_area, status_area] =
-                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
+            let [title_area, content_area, footer_area] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .areas(frame.area());
+
+            render_title_bar(frame, title_area, &theme);
 
             if show_transcript {
-                let [notes_area, transcript_area] = Layout::horizontal([
+                let [notes_area, separator_area, transcript_area] = Layout::horizontal([
                     Constraint::Percentage(55),
+                    Constraint::Length(1),
                     Constraint::Percentage(45),
                 ])
-                .areas(transcript_area);
+                .areas(content_area);
 
-                let notes = Paragraph::new(Text::from(notes_lines.clone()))
-                    .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                        "Notes",
-                        Style::default().fg(theme.heading),
-                    )))
-                    .wrap(Wrap { trim: true });
-                frame.render_widget(notes, notes_area);
+                let separator = Paragraph::new(Text::from(Line::from(Span::styled(
+                    "|",
+                    Style::default().fg(theme.muted),
+                ))));
+                frame.render_widget(separator, separator_area);
 
-                let transcript = Paragraph::new(Text::from(transcript_lines.clone()))
-                    .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                        "Transcript",
-                        Style::default().fg(theme.heading),
-                    )))
-                    .wrap(Wrap { trim: true });
-                frame.render_widget(transcript, transcript_area);
+                render_scrolled_paragraph(frame, notes_area, &notes_lines);
+                render_scrolled_paragraph(frame, transcript_area, &transcript_lines);
             } else {
-                let notes = Paragraph::new(Text::from(notes_lines.clone()))
-                    .block(Block::default().borders(Borders::ALL).title(Span::styled(
-                        "Notes",
-                        Style::default().fg(theme.heading),
-                    )))
-                    .wrap(Wrap { trim: true });
-                frame.render_widget(notes, transcript_area);
+                render_scrolled_paragraph(frame, content_area, &notes_lines);
             }
 
-            if editing_context {
-                let area = centered_rect(70, 60, frame.area());
-                frame.render_widget(Clear, area);
-                let title = Span::styled(
-                    "Context (Ctrl+S save, Esc cancel)",
-                    Style::default().fg(theme.heading),
-                );
-                let body = if context_buffer.is_empty() {
-                    Text::from(Line::from(Span::styled(
-                        "type context...",
-                        Style::default().fg(theme.muted),
-                    )))
-                } else {
-                    Text::from(context_buffer.clone())
-                };
-                let editor = Paragraph::new(body)
-                    .block(Block::default().borders(Borders::ALL).title(title))
-                    .wrap(Wrap { trim: false });
-                frame.render_widget(editor, area);
-            }
+            let footer_state = FooterState {
+                phase,
+                capture_paused,
+                elapsed: meeting_elapsed,
+                waveform: &waveform,
+                asr_name: &asr_name,
+                asr_connected,
+                asr_lag_ms,
+                stats: &ctx.stats,
+                ledger: &ledger,
+            };
+            render_footer(frame, footer_area, &theme, footer_state);
 
-            let asr_status = if asr_connected { "ok" } else { "disconnected" };
-            let lag_text = asr_lag_ms
-                .map(|ms| format!("{ms}ms"))
-                .unwrap_or_else(|| "n/a".to_string());
-            let status = Paragraph::new(Text::raw(format!(
-                "asr: {} ({})  lag: {}  frames: {}  drops: {}  chunks: {}/{}  segments: {}  |  q quit  t transcript  p provider  c context",
-                asr_name,
-                asr_status,
-                lag_text,
-                stats.frames_captured(),
-                stats.frames_dropped(),
-                stats.chunks_emitted(),
-                stats.chunks_dropped(),
-                ledger.len(),
-            )))
-            .style(Style::default().fg(theme.muted));
-            frame.render_widget(status, status_area);
+            match &mode {
+                UiMode::Palette(state) => {
+                    render_palette(frame, state, &theme, phase, capture_paused);
+                }
+                UiMode::TextInput(input) => {
+                    render_text_input(frame, input, &theme);
+                }
+                UiMode::Normal => {}
+            }
         })?;
 
-        // Poll for input
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
-                if editing_context {
-                    match key.code {
-                        KeyCode::Esc => {
-                            editing_context = false;
-                            context_buffer.clear();
-                        }
-                        KeyCode::Enter => {
-                            context_buffer.push('\n');
-                        }
-                        KeyCode::Backspace => {
-                            context_buffer.pop();
-                        }
-                        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            context = context_buffer.clone();
-                            if let Err(err) = session.update_context(context_buffer.clone()) {
-                                eprintln!("context update failed: {err}");
-                            }
-                            editing_context = false;
-                        }
-                        KeyCode::Char(ch) => {
-                            context_buffer.push(ch);
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-                if key.code == KeyCode::Char('q')
-                    || (key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL))
-                {
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     break;
                 }
-                if key.code == KeyCode::Char('p') {
-                    let _ = asr_cmd_tx.send(AsrCommand::ToggleProvider);
-                }
-                if key.code == KeyCode::Char('t') {
-                    show_transcript = !show_transcript;
-                    transcript_needs_render = true;
-                }
-                if key.code == KeyCode::Char('c') {
-                    editing_context = true;
-                    context_buffer = context.clone();
+
+                match &mut mode {
+                    UiMode::Normal => {
+                        if key.code == KeyCode::Char('q') {
+                            break;
+                        }
+                        if key.code == KeyCode::Char('p')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            mode = UiMode::Palette(PaletteState::new());
+                        }
+                    }
+                    UiMode::Palette(state) => {
+                        if key.code == KeyCode::Esc {
+                            mode = UiMode::Normal;
+                            continue;
+                        }
+                        if key.code == KeyCode::Up && state.selected > 0 {
+                            state.selected -= 1;
+                        }
+                        if key.code == KeyCode::Down {
+                            state.selected = state.selected.saturating_add(1);
+                        }
+                        if key.code == KeyCode::Backspace {
+                            state.filter.pop();
+                            state.selected = 0;
+                        }
+                        if let KeyCode::Char(ch) = key.code {
+                            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                                state.filter.push(ch);
+                                state.selected = 0;
+                            }
+                        }
+                        if key.code == KeyCode::Enter {
+                            let commands = filtered_commands(phase, capture_paused, &state.filter);
+                            if let Some(command) = commands.get(state.selected) {
+                                match command.id {
+                                    PaletteCommandId::StartMeeting => {
+                                        let start_input = StartMeetingInput {
+                                            factory: &ctx.session_factory,
+                                            shared_writer: &ctx.shared_writer,
+                                            asr_provider: &asr_name,
+                                            asr_models: &asr_models,
+                                            summarizer_provider: &summarizer_provider,
+                                            summarizer_model: &summarizer_model,
+                                            context: &context,
+                                            participants: &ctx.participants,
+                                        };
+                                        if let Ok(new_session) = start_meeting(start_input) {
+                                            session = Some(new_session);
+                                            session_finalized = false;
+                                            meeting_state = MeetingState::default();
+                                            ledger = TranscriptLedger::new();
+                                            transcript_lines =
+                                                render_transcript_lines(&ledger, &theme);
+                                            notes_lines =
+                                                render_notes_lines(&meeting_state, &theme);
+                                            meeting_started_at = Some(Instant::now());
+                                            meeting_elapsed = Duration::ZERO;
+                                            phase = MeetingPhase::MeetingActive;
+                                            capture_paused = false;
+                                            processor.resume();
+                                        }
+                                    }
+                                    PaletteCommandId::EndMeeting => {
+                                        if let Some(active_session) = session.as_mut() {
+                                            let segments = ledger.segments().to_vec();
+                                            let state_snapshot = meeting_state.clone();
+                                            if let Err(err) = export_session_with_timeout(
+                                                active_session.clone(),
+                                                segments,
+                                                state_snapshot,
+                                            ) {
+                                                eprintln!("export failed: {err}");
+                                            } else if let Err(err) = active_session.finalize() {
+                                                eprintln!("session finalize failed: {err}");
+                                            }
+                                            session_finalized = true;
+                                        }
+                                        processor.pause();
+                                        ctx.shared_writer.set(None);
+                                        capture_paused = true;
+                                        phase = MeetingPhase::PostMeeting;
+                                    }
+                                    PaletteCommandId::PauseCapture => {
+                                        processor.pause();
+                                        capture_paused = true;
+                                    }
+                                    PaletteCommandId::ResumeCapture => {
+                                        processor.resume();
+                                        capture_paused = false;
+                                    }
+                                    PaletteCommandId::ForceSummarize => {}
+                                    PaletteCommandId::SwitchAsrProvider => {
+                                        let _ = ctx.asr_cmd_tx.send(AsrCommand::ToggleProvider);
+                                    }
+                                    PaletteCommandId::SwitchSummarizer => {
+                                        summarizer_provider = if summarizer_provider == "ollama" {
+                                            "openrouter".to_string()
+                                        } else {
+                                            "ollama".to_string()
+                                        };
+                                        if let Some(active_session) = session.as_mut() {
+                                            if let Err(err) = active_session.update_summarizer(
+                                                summarizer_provider.clone(),
+                                                summarizer_model.clone(),
+                                            ) {
+                                                eprintln!(
+                                                    "session summarizer update failed: {err}"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    PaletteCommandId::SetAsrModel => {
+                                        let buffer = asr_models.current_model(&asr_name);
+                                        mode = UiMode::TextInput(TextInputState {
+                                            kind: TextInputKind::AsrModel,
+                                            buffer,
+                                        });
+                                        continue;
+                                    }
+                                    PaletteCommandId::SetSummarizerModel => {
+                                        mode = UiMode::TextInput(TextInputState {
+                                            kind: TextInputKind::SummarizerModel,
+                                            buffer: summarizer_model.clone(),
+                                        });
+                                        continue;
+                                    }
+                                    PaletteCommandId::EditContext => {
+                                        mode = UiMode::TextInput(TextInputState {
+                                            kind: TextInputKind::Context,
+                                            buffer: context.clone(),
+                                        });
+                                        continue;
+                                    }
+                                    PaletteCommandId::ToggleTranscript => {
+                                        show_transcript = !show_transcript;
+                                    }
+                                    PaletteCommandId::BrowseSessions => {
+                                        if let Err(err) =
+                                            open_path(ctx.session_factory.sessions_dir())
+                                        {
+                                            eprintln!("open sessions failed: {err}");
+                                        }
+                                    }
+                                    PaletteCommandId::CopyTranscriptPath => {
+                                        if let Some(active_session) = session.as_ref() {
+                                            if let Ok(path) =
+                                                active_session.export_transcript_path()
+                                            {
+                                                if let Err(err) = copy_to_clipboard(&path) {
+                                                    eprintln!("copy failed: {err}");
+                                                }
+                                            }
+                                        }
+                                    }
+                                    PaletteCommandId::CopyNotesPath => {
+                                        if let Some(active_session) = session.as_ref() {
+                                            if let Ok(path) = active_session.export_notes_path() {
+                                                if let Err(err) = copy_to_clipboard(&path) {
+                                                    eprintln!("copy failed: {err}");
+                                                }
+                                            }
+                                        }
+                                    }
+                                    PaletteCommandId::CopyAudioPath => {
+                                        if let Some(active_session) = session.as_ref() {
+                                            if let Err(err) =
+                                                copy_to_clipboard(&active_session.audio_raw_path())
+                                            {
+                                                eprintln!("copy failed: {err}");
+                                            }
+                                        }
+                                    }
+                                    PaletteCommandId::OpenSessionFolder => {
+                                        if let Some(active_session) = session.as_ref() {
+                                            if let Err(err) =
+                                                open_path(active_session.session_dir())
+                                            {
+                                                eprintln!("open session failed: {err}");
+                                            }
+                                        }
+                                    }
+                                    PaletteCommandId::ExportMarkdown => {
+                                        if let Some(active_session) = session.as_mut() {
+                                            if let Err(err) = active_session
+                                                .export_transcript_markdown(ledger.segments())
+                                            {
+                                                eprintln!("export transcript failed: {err}");
+                                            }
+                                            if let Err(err) =
+                                                active_session.export_notes_markdown(&meeting_state)
+                                            {
+                                                eprintln!("export notes failed: {err}");
+                                            }
+                                        }
+                                    }
+                                    PaletteCommandId::StartNewMeeting => {
+                                        if let Some(active_session) = session.as_mut() {
+                                            if !active_session.is_finalized() && !session_finalized
+                                            {
+                                                let segments = ledger.segments().to_vec();
+                                                let state_snapshot = meeting_state.clone();
+                                                let _ = export_session_with_timeout(
+                                                    active_session.clone(),
+                                                    segments,
+                                                    state_snapshot,
+                                                );
+                                                let _ = active_session.finalize();
+                                            }
+                                        }
+                                        session = None;
+                                        session_finalized = false;
+                                        meeting_state = MeetingState::default();
+                                        ledger = TranscriptLedger::new();
+                                        transcript_lines = render_transcript_lines(&ledger, &theme);
+                                        notes_lines = render_notes_lines(&meeting_state, &theme);
+                                        meeting_started_at = None;
+                                        meeting_elapsed = Duration::ZERO;
+                                        phase = MeetingPhase::Idle;
+                                        capture_paused = true;
+                                        processor.pause();
+                                        ctx.shared_writer.set(None);
+
+                                        let start_input = StartMeetingInput {
+                                            factory: &ctx.session_factory,
+                                            shared_writer: &ctx.shared_writer,
+                                            asr_provider: &asr_name,
+                                            asr_models: &asr_models,
+                                            summarizer_provider: &summarizer_provider,
+                                            summarizer_model: &summarizer_model,
+                                            context: &context,
+                                            participants: &ctx.participants,
+                                        };
+                                        if let Ok(new_session) = start_meeting(start_input) {
+                                            session = Some(new_session);
+                                            session_finalized = false;
+                                            meeting_state = MeetingState::default();
+                                            ledger = TranscriptLedger::new();
+                                            transcript_lines =
+                                                render_transcript_lines(&ledger, &theme);
+                                            notes_lines =
+                                                render_notes_lines(&meeting_state, &theme);
+                                            meeting_started_at = Some(Instant::now());
+                                            meeting_elapsed = Duration::ZERO;
+                                            phase = MeetingPhase::MeetingActive;
+                                            capture_paused = false;
+                                            processor.resume();
+                                        }
+                                    }
+                                }
+                            }
+                            mode = UiMode::Normal;
+                        }
+                    }
+                    UiMode::TextInput(input) => {
+                        if key.code == KeyCode::Esc {
+                            mode = UiMode::Normal;
+                            continue;
+                        }
+                        if key.code == KeyCode::Char('s')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            match input.kind {
+                                TextInputKind::Context => {
+                                    context = input.buffer.clone();
+                                    if let Some(active_session) = session.as_mut() {
+                                        if let Err(err) =
+                                            active_session.update_context(input.buffer.clone())
+                                        {
+                                            eprintln!("context update failed: {err}");
+                                        }
+                                    }
+                                }
+                                TextInputKind::AsrModel => {
+                                    asr_models
+                                        .update_model(&asr_name, input.buffer.trim().to_string());
+                                    if let Some(active_session) = session.as_mut() {
+                                        let model = asr_models.current_model(&asr_name);
+                                        if let Err(err) =
+                                            active_session.update_asr(asr_name.clone(), model)
+                                        {
+                                            eprintln!("session asr update failed: {err}");
+                                        }
+                                    }
+                                }
+                                TextInputKind::SummarizerModel => {
+                                    summarizer_model = input.buffer.trim().to_string();
+                                    if let Some(active_session) = session.as_mut() {
+                                        if let Err(err) = active_session.update_summarizer(
+                                            summarizer_provider.clone(),
+                                            summarizer_model.clone(),
+                                        ) {
+                                            eprintln!("session summarizer update failed: {err}");
+                                        }
+                                    }
+                                }
+                            }
+                            mode = UiMode::Normal;
+                            continue;
+                        }
+                        if key.code == KeyCode::Backspace {
+                            input.buffer.pop();
+                            continue;
+                        }
+                        if key.code == KeyCode::Enter {
+                            match input.kind {
+                                TextInputKind::Context => input.buffer.push('\n'),
+                                TextInputKind::AsrModel | TextInputKind::SummarizerModel => {
+                                    let buffer = input.buffer.clone();
+                                    match input.kind {
+                                        TextInputKind::AsrModel => {
+                                            asr_models
+                                                .update_model(&asr_name, buffer.trim().to_string());
+                                            if let Some(active_session) = session.as_mut() {
+                                                let model = asr_models.current_model(&asr_name);
+                                                if let Err(err) = active_session
+                                                    .update_asr(asr_name.clone(), model)
+                                                {
+                                                    eprintln!("session asr update failed: {err}");
+                                                }
+                                            }
+                                        }
+                                        TextInputKind::SummarizerModel => {
+                                            summarizer_model = buffer.trim().to_string();
+                                            if let Some(active_session) = session.as_mut() {
+                                                if let Err(err) = active_session.update_summarizer(
+                                                    summarizer_provider.clone(),
+                                                    summarizer_model.clone(),
+                                                ) {
+                                                    eprintln!(
+                                                        "session summarizer update failed: {err}"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                    mode = UiMode::Normal;
+                                }
+                            }
+                            continue;
+                        }
+                        if let KeyCode::Char(ch) = key.code {
+                            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                                input.buffer.push(ch);
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    drop(processor_guard);
-    export_session_with_timeout(session, ledger.segments().to_vec(), meeting_state)?;
+    processor.stop();
+
+    if let Some(mut active_session) = session {
+        if !active_session.is_finalized() && !session_finalized {
+            let segments = ledger.segments().to_vec();
+            let state_snapshot = meeting_state.clone();
+            let _ = export_session_with_timeout(active_session.clone(), segments, state_snapshot);
+            let _ = active_session.finalize();
+        }
+    }
+
     Ok(())
+}
+
+fn start_meeting(
+    input: StartMeetingInput<'_>,
+) -> Result<SessionHandle, crate::session::SessionError> {
+    let session = input.factory.create(
+        input.asr_provider.to_string(),
+        input.asr_models.model_for(input.asr_provider),
+        input.summarizer_provider.to_string(),
+        input.summarizer_model.to_string(),
+        if input.context.trim().is_empty() {
+            None
+        } else {
+            Some(input.context.to_string())
+        },
+        input.participants.to_vec(),
+    )?;
+    let audio_raw = session.open_audio_raw()?;
+    input
+        .shared_writer
+        .set(Some(RawAudioWriter::new(audio_raw)));
+    Ok(session)
+}
+
+fn render_title_bar(frame: &mut ratatui::Frame, area: Rect, theme: &UiTheme) {
+    let hint = "ctrl+p command palette";
+    let hint_len = hint.len() as u16;
+    let [left, right] =
+        Layout::horizontal([Constraint::Min(1), Constraint::Length(hint_len + 1)]).areas(area);
+
+    let version = env!("CARGO_PKG_VERSION");
+    let left_line = Line::from(vec![
+        Span::styled("■ ", Style::default().fg(theme.accent)),
+        Span::styled(format!("koe v{version}"), Style::default().fg(theme.accent)),
+    ]);
+    let right_line = Line::from(Span::styled(hint, Style::default().fg(theme.muted)));
+
+    frame.render_widget(Paragraph::new(left_line), left);
+    frame.render_widget(
+        Paragraph::new(right_line).alignment(Alignment::Right),
+        right,
+    );
+}
+
+fn render_footer(frame: &mut ratatui::Frame, area: Rect, theme: &UiTheme, state: FooterState) {
+    let timer_text = match state.phase {
+        MeetingPhase::MeetingActive => format_duration(state.elapsed),
+        MeetingPhase::PostMeeting => format_duration(state.elapsed),
+        MeetingPhase::Idle => "--:--".to_string(),
+    };
+    let timer_style = match state.phase {
+        MeetingPhase::MeetingActive => Style::default().fg(theme.accent),
+        _ => Style::default().fg(theme.muted),
+    };
+
+    let wave_text = if state.phase == MeetingPhase::MeetingActive && !state.capture_paused {
+        state.waveform.current().to_string()
+    } else {
+        "----------".to_string()
+    };
+
+    let asr_state = if state.asr_connected { "ok" } else { "disc" };
+    let lag = state
+        .asr_lag_ms
+        .map(|ms| format!("{:.1}", ms as f64 / 1000.0))
+        .unwrap_or_else(|| "n/a".to_string());
+    let metrics = format!(
+        "asr:{} {asr_state} lag:{lag}s chunks:{}/{} segs:{}",
+        state.asr_name,
+        state.stats.chunks_emitted(),
+        state.stats.chunks_dropped(),
+        state.ledger.len(),
+    );
+
+    let [left, middle, right] = Layout::horizontal([
+        Constraint::Length(timer_text.len() as u16 + 1),
+        Constraint::Length(wave_text.len() as u16 + 2),
+        Constraint::Min(1),
+    ])
+    .areas(area);
+
+    frame.render_widget(Paragraph::new(timer_text).style(timer_style), left);
+    frame.render_widget(
+        Paragraph::new(wave_text).style(Style::default().fg(theme.muted)),
+        middle,
+    );
+    frame.render_widget(
+        Paragraph::new(metrics)
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(theme.muted)),
+        right,
+    );
+}
+
+fn render_palette(
+    frame: &mut ratatui::Frame,
+    state: &PaletteState,
+    theme: &UiTheme,
+    phase: MeetingPhase,
+    capture_paused: bool,
+) {
+    let width = 60.min(frame.area().width.saturating_sub(4) as usize) as u16;
+    let height = 2 + 1 + 12;
+    let area = centered_rect(width, height, frame.area());
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().borders(Borders::ALL), area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    let [title_area, input_area, list_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+    ])
+    .areas(inner);
+
+    frame.render_widget(
+        Paragraph::new("Command Palette")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(theme.heading)),
+        title_area,
+    );
+
+    let input_line = format!("> {}", state.filter);
+    frame.render_widget(Paragraph::new(input_line), input_area);
+
+    let commands = filtered_commands(phase, capture_paused, &state.filter);
+    let selected = if commands.is_empty() {
+        0
+    } else {
+        state.selected.min(commands.len().saturating_sub(1))
+    };
+    let visible = limit_commands(&commands, selected, list_area.height as usize);
+    let lines = render_command_lines(visible, theme, list_area.width as usize);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: true }),
+        list_area,
+    );
+}
+
+fn render_command_lines(
+    commands: Vec<(PaletteCommand, bool)>,
+    theme: &UiTheme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for (command, is_selected) in commands.into_iter() {
+        let label = command.label;
+        let category = command.category;
+        let available = width.saturating_sub(1);
+        let gap = available
+            .saturating_sub(label.len())
+            .saturating_sub(category.len())
+            .max(1);
+        let padding = " ".repeat(gap);
+        let spans = if is_selected {
+            vec![
+                Span::styled(
+                    label.to_string(),
+                    Style::default().fg(Color::Black).bg(theme.accent),
+                ),
+                Span::styled(padding, Style::default().bg(theme.accent)),
+                Span::styled(
+                    category.to_string(),
+                    Style::default().fg(Color::Black).bg(theme.accent),
+                ),
+            ]
+        } else {
+            vec![
+                Span::styled(label.to_string(), Style::default().fg(theme.neutral)),
+                Span::styled(padding, Style::default().fg(theme.neutral)),
+                Span::styled(category.to_string(), Style::default().fg(theme.muted)),
+            ]
+        };
+
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+fn render_text_input(frame: &mut ratatui::Frame, input: &TextInputState, theme: &UiTheme) {
+    let width = 70.min(frame.area().width.saturating_sub(4) as usize) as u16;
+    let height = 10.min(frame.area().height.saturating_sub(4) as usize) as u16;
+    let area = centered_rect(width, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let title = match input.kind {
+        TextInputKind::Context => "Context (Ctrl+S save, Esc cancel)",
+        TextInputKind::AsrModel => "ASR Model (Enter save, Esc cancel)",
+        TextInputKind::SummarizerModel => "Summarizer Model (Enter save, Esc cancel)",
+    };
+
+    let body = if input.buffer.is_empty() {
+        Text::from(Line::from(Span::styled(
+            "type...",
+            Style::default().fg(theme.muted),
+        )))
+    } else {
+        Text::from(input.buffer.clone())
+    };
+
+    let editor = Paragraph::new(body)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(title, Style::default().fg(theme.heading))),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(editor, area);
+}
+
+fn render_scrolled_paragraph(frame: &mut ratatui::Frame, area: Rect, lines: &[Line<'static>]) {
+    let scroll = lines.len().saturating_sub(area.height as usize) as u16;
+    let padded = pad_lines(lines);
+    let paragraph = Paragraph::new(Text::from(padded))
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
+    frame.render_widget(paragraph, area);
+}
+
+fn pad_lines(lines: &[Line<'static>]) -> Vec<Line<'static>> {
+    lines
+        .iter()
+        .cloned()
+        .map(|line| {
+            let mut spans = vec![Span::raw(" ")];
+            spans.extend(line.spans);
+            Line::from(spans)
+        })
+        .collect()
 }
 
 fn render_transcript_lines(ledger: &TranscriptLedger, theme: &UiTheme) -> Vec<Line<'static>> {
     const MAX_SEGMENTS: usize = 200;
     let segments = ledger.segments();
     let start = segments.len().saturating_sub(MAX_SEGMENTS);
-    let mut lines = Vec::with_capacity(segments.len().saturating_sub(start).max(1));
+    let mut lines = Vec::new();
+
+    lines.push(Line::from(Span::styled(
+        "Transcript",
+        Style::default().fg(theme.heading),
+    )));
 
     for seg in &segments[start..] {
         let mut spans = Vec::new();
@@ -321,7 +1031,7 @@ fn render_transcript_lines(ledger: &TranscriptLedger, theme: &UiTheme) -> Vec<Li
         lines.push(Line::from(spans));
     }
 
-    if lines.is_empty() {
+    if segments.is_empty() {
         lines.push(Line::from(Span::styled(
             "waiting for transcript...",
             Style::default().fg(theme.muted),
@@ -333,54 +1043,255 @@ fn render_transcript_lines(ledger: &TranscriptLedger, theme: &UiTheme) -> Vec<Li
 
 fn render_notes_lines(state: &MeetingState, theme: &UiTheme) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "Notes",
+        Style::default().fg(theme.heading),
+    )));
 
     if state.key_points.is_empty() && state.actions.is_empty() && state.decisions.is_empty() {
         lines.push(Line::from(Span::styled(
-            "waiting for notes...".to_string(),
+            "waiting for notes...",
             Style::default().fg(theme.muted),
         )));
         return lines;
     }
 
-    if !state.key_points.is_empty() {
-        lines.push(heading_line("Key Points".to_string(), theme));
-        for item in &state.key_points {
-            lines.push(note_line(item.text.clone(), theme));
-        }
-        lines.push(Line::from(Span::raw("")));
+    for item in &state.key_points {
+        lines.push(note_line(item.text.clone(), theme));
     }
 
-    if !state.actions.is_empty() {
-        lines.push(heading_line("Actions".to_string(), theme));
-        for item in &state.actions {
-            let mut text = item.text.clone();
-            if item.owner.is_some() || item.due.is_some() {
-                let owner = item.owner.clone().unwrap_or_default();
-                let due = item.due.clone().unwrap_or_default();
-                text.push_str(" — ");
-                if !owner.is_empty() {
-                    text.push_str(owner.as_str());
-                }
-                if !due.is_empty() {
-                    if !owner.is_empty() {
-                        text.push_str(", ");
-                    }
-                    text.push_str(due.as_str());
-                }
+    for item in &state.actions {
+        let mut text = item.text.clone();
+        if item.owner.is_some() || item.due.is_some() {
+            let owner = item.owner.clone().unwrap_or_default();
+            let due = item.due.clone().unwrap_or_default();
+            text.push_str(" — ");
+            if !owner.is_empty() {
+                text.push_str(owner.as_str());
             }
-            lines.push(note_line(text, theme));
+            if !due.is_empty() {
+                if !owner.is_empty() {
+                    text.push_str(", ");
+                }
+                text.push_str(due.as_str());
+            }
         }
-        lines.push(Line::from(Span::raw("")));
+        lines.push(note_line(text, theme));
     }
 
-    if !state.decisions.is_empty() {
-        lines.push(heading_line("Decisions".to_string(), theme));
-        for item in &state.decisions {
-            lines.push(note_line(item.text.clone(), theme));
-        }
+    for item in &state.decisions {
+        lines.push(note_line(item.text.clone(), theme));
     }
 
     lines
+}
+
+fn filtered_commands(
+    phase: MeetingPhase,
+    capture_paused: bool,
+    filter: &str,
+) -> Vec<PaletteCommand> {
+    let commands = commands_for_phase(phase, capture_paused);
+    if filter.trim().is_empty() {
+        return commands;
+    }
+    commands
+        .into_iter()
+        .filter(|command| fuzzy_match(filter, command.label))
+        .collect()
+}
+
+fn commands_for_phase(phase: MeetingPhase, capture_paused: bool) -> Vec<PaletteCommand> {
+    match phase {
+        MeetingPhase::Idle => vec![
+            PaletteCommand {
+                id: PaletteCommandId::StartMeeting,
+                label: "start meeting",
+                category: "meeting",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::SwitchAsrProvider,
+                label: "switch ASR provider",
+                category: "setting",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::SwitchSummarizer,
+                label: "switch summarizer",
+                category: "setting",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::SetAsrModel,
+                label: "set ASR model",
+                category: "setting",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::SetSummarizerModel,
+                label: "set summarizer model",
+                category: "setting",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::EditContext,
+                label: "edit context",
+                category: "setting",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::ToggleTranscript,
+                label: "toggle transcript",
+                category: "view",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::BrowseSessions,
+                label: "browse sessions",
+                category: "view",
+            },
+        ],
+        MeetingPhase::MeetingActive => {
+            let mut commands = vec![
+                PaletteCommand {
+                    id: PaletteCommandId::EndMeeting,
+                    label: "end meeting",
+                    category: "meeting",
+                },
+                PaletteCommand {
+                    id: PaletteCommandId::ForceSummarize,
+                    label: "force summarize",
+                    category: "meeting",
+                },
+                PaletteCommand {
+                    id: PaletteCommandId::SwitchAsrProvider,
+                    label: "switch ASR provider",
+                    category: "setting",
+                },
+                PaletteCommand {
+                    id: PaletteCommandId::SwitchSummarizer,
+                    label: "switch summarizer",
+                    category: "setting",
+                },
+                PaletteCommand {
+                    id: PaletteCommandId::EditContext,
+                    label: "edit context",
+                    category: "setting",
+                },
+                PaletteCommand {
+                    id: PaletteCommandId::ToggleTranscript,
+                    label: "toggle transcript",
+                    category: "view",
+                },
+            ];
+            if capture_paused {
+                commands.insert(
+                    1,
+                    PaletteCommand {
+                        id: PaletteCommandId::ResumeCapture,
+                        label: "resume capture",
+                        category: "meeting",
+                    },
+                );
+            } else {
+                commands.insert(
+                    1,
+                    PaletteCommand {
+                        id: PaletteCommandId::PauseCapture,
+                        label: "pause capture",
+                        category: "meeting",
+                    },
+                );
+            }
+            commands
+        }
+        MeetingPhase::PostMeeting => vec![
+            PaletteCommand {
+                id: PaletteCommandId::CopyTranscriptPath,
+                label: "copy transcript path",
+                category: "export",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::CopyNotesPath,
+                label: "copy notes path",
+                category: "export",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::CopyAudioPath,
+                label: "copy audio path",
+                category: "export",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::OpenSessionFolder,
+                label: "open session folder",
+                category: "export",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::ExportMarkdown,
+                label: "export markdown",
+                category: "export",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::StartNewMeeting,
+                label: "start new meeting",
+                category: "meeting",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::BrowseSessions,
+                label: "browse sessions",
+                category: "view",
+            },
+        ],
+    }
+}
+
+fn limit_commands(
+    commands: &[PaletteCommand],
+    selected: usize,
+    max_rows: usize,
+) -> Vec<(PaletteCommand, bool)> {
+    if commands.is_empty() {
+        return Vec::new();
+    }
+    let mut selected = selected.min(commands.len().saturating_sub(1));
+    let start = if selected >= max_rows {
+        selected + 1 - max_rows
+    } else {
+        0
+    };
+    let end = (start + max_rows).min(commands.len());
+    selected -= start;
+
+    commands[start..end]
+        .iter()
+        .enumerate()
+        .map(|(idx, command)| (*command, idx == selected))
+        .collect()
+}
+
+fn fuzzy_match(needle: &str, haystack: &str) -> bool {
+    let needle = needle.to_lowercase();
+    let haystack = haystack.to_lowercase();
+    let mut chars = needle.chars();
+    let mut current = chars.next();
+
+    for ch in haystack.chars() {
+        if let Some(target) = current {
+            if ch == target {
+                current = chars.next();
+            }
+        } else {
+            return true;
+        }
+    }
+
+    current.is_none()
+}
+
+fn format_duration(duration: Duration) -> String {
+    let total_secs = duration.as_secs();
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
 }
 
 fn export_session_with_timeout(
@@ -395,16 +1306,13 @@ fn export_session_with_timeout(
     });
 
     match rx.recv_timeout(Duration::from_secs(2)) {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => {
-            eprintln!("export failed: {err}");
-        }
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(Box::new(err)),
         Err(_) => {
             eprintln!("export timed out after 2s");
+            Ok(())
         }
     }
-
-    Ok(())
 }
 
 fn apply_notes_patch(state: &mut MeetingState, patch: NotesPatch) -> bool {
@@ -504,14 +1412,12 @@ fn upsert_action(
     true
 }
 
-fn heading_line(label: String, theme: &UiTheme) -> Line<'static> {
-    Line::from(Span::styled(label, Style::default().fg(theme.heading)))
-}
-
 fn note_line(text: String, theme: &UiTheme) -> Line<'static> {
+    let bullet = "·";
     if let Some(rest) = text.strip_prefix("Me:") {
         return Line::from(vec![
-            Span::styled("Me:".to_string(), Style::default().fg(theme.me)),
+            Span::styled(format!("{bullet} "), Style::default().fg(theme.neutral)),
+            Span::styled("Me:", Style::default().fg(theme.me)),
             Span::styled(
                 format!(" {}", rest.trim_start()),
                 Style::default().fg(theme.neutral),
@@ -520,7 +1426,8 @@ fn note_line(text: String, theme: &UiTheme) -> Line<'static> {
     }
     if let Some(rest) = text.strip_prefix("Them:") {
         return Line::from(vec![
-            Span::styled("Them:".to_string(), Style::default().fg(theme.them)),
+            Span::styled(format!("{bullet} "), Style::default().fg(theme.neutral)),
+            Span::styled("Them:", Style::default().fg(theme.them)),
             Span::styled(
                 format!(" {}", rest.trim_start()),
                 Style::default().fg(theme.neutral),
@@ -529,7 +1436,7 @@ fn note_line(text: String, theme: &UiTheme) -> Line<'static> {
     }
 
     Line::from(Span::styled(
-        format!("- {text}"),
+        format!("{bullet} {text}"),
         Style::default().fg(theme.neutral),
     ))
 }
@@ -542,22 +1449,46 @@ fn speaker_style(theme: &UiTheme, speaker: &str) -> Style {
     }
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width.saturating_sub(2));
+    let height = height.min(area.height.saturating_sub(2));
+
     let [_, middle, _] = Layout::vertical([
-        Constraint::Percentage((100 - percent_y) / 2),
-        Constraint::Percentage(percent_y),
-        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Length((area.height.saturating_sub(height)) / 2),
+        Constraint::Length(height),
+        Constraint::Min(0),
     ])
     .areas(area);
 
     let [_, center, _] = Layout::horizontal([
-        Constraint::Percentage((100 - percent_x) / 2),
-        Constraint::Percentage(percent_x),
-        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Length((area.width.saturating_sub(width)) / 2),
+        Constraint::Length(width),
+        Constraint::Min(0),
     ])
     .areas(middle);
 
     center
+}
+
+fn copy_to_clipboard(path: &Path) -> io::Result<()> {
+    let output = path.to_string_lossy().to_string();
+    let mut child = Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(output.as_bytes())?;
+    }
+    let _ = child.wait();
+    Ok(())
+}
+
+fn open_path(path: &Path) -> io::Result<()> {
+    let status = Command::new("open").arg(path).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other("open command failed"))
+    }
 }
 
 #[cfg(test)]

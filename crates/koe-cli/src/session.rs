@@ -66,6 +66,60 @@ pub struct SessionMetadataInput {
     pub summarizer_model: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionFactory {
+    paths: ConfigPaths,
+    export_dir: Option<PathBuf>,
+    audio_sample_rate_hz: u32,
+    audio_channels: u16,
+    audio_sources: Vec<String>,
+}
+
+impl SessionFactory {
+    pub fn new(
+        paths: ConfigPaths,
+        export_dir: Option<PathBuf>,
+        audio_sample_rate_hz: u32,
+        audio_channels: u16,
+        audio_sources: Vec<String>,
+    ) -> Self {
+        Self {
+            paths,
+            export_dir,
+            audio_sample_rate_hz,
+            audio_channels,
+            audio_sources,
+        }
+    }
+
+    pub fn create(
+        &self,
+        asr_provider: String,
+        asr_model: String,
+        summarizer_provider: String,
+        summarizer_model: String,
+        context: Option<String>,
+        participants: Vec<String>,
+    ) -> Result<SessionHandle, SessionError> {
+        let metadata = SessionMetadata::new(SessionMetadataInput {
+            context,
+            participants,
+            audio_sample_rate_hz: self.audio_sample_rate_hz,
+            audio_channels: self.audio_channels,
+            audio_sources: self.audio_sources.clone(),
+            asr_provider,
+            asr_model,
+            summarizer_provider,
+            summarizer_model,
+        })?;
+        SessionHandle::start(&self.paths, metadata, self.export_dir.clone())
+    }
+
+    pub fn sessions_dir(&self) -> &Path {
+        &self.paths.sessions_dir
+    }
+}
+
 impl SessionMetadata {
     pub fn new(input: SessionMetadataInput) -> Result<Self, SessionError> {
         let id = Uuid::now_v7().to_string();
@@ -103,7 +157,7 @@ impl SessionMetadata {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SessionHandle {
     dir: PathBuf,
     export_dir: Option<PathBuf>,
@@ -148,8 +202,42 @@ impl SessionHandle {
         })
     }
 
-    pub fn context(&self) -> Option<&str> {
-        self.metadata.context.as_deref()
+    pub fn session_dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn audio_raw_path(&self) -> PathBuf {
+        self.dir.join(&self.metadata.audio_raw_file)
+    }
+
+    pub fn export_transcript_path(&self) -> Result<PathBuf, SessionError> {
+        let root = self.export_root()?;
+        Ok(root.join("transcript.md"))
+    }
+
+    pub fn export_notes_path(&self) -> Result<PathBuf, SessionError> {
+        let root = self.export_root()?;
+        Ok(root.join("notes.md"))
+    }
+
+    pub fn update_asr(&mut self, provider: String, model: String) -> Result<(), SessionError> {
+        self.metadata.asr_provider = provider;
+        self.metadata.asr_model = model;
+        self.touch_metadata()
+    }
+
+    pub fn update_summarizer(
+        &mut self,
+        provider: String,
+        model: String,
+    ) -> Result<(), SessionError> {
+        self.metadata.summarizer_provider = provider;
+        self.metadata.summarizer_model = model;
+        self.touch_metadata()
+    }
+
+    pub fn is_finalized(&self) -> bool {
+        self.metadata.finalized
     }
 
     pub fn open_audio_raw(&self) -> Result<std::fs::File, SessionError> {
@@ -284,10 +372,6 @@ impl SessionHandle {
         self.metadata.finalized = true;
         write_metadata(&self.metadata_path, &self.metadata)?;
         Ok(())
-    }
-
-    fn audio_raw_path(&self) -> PathBuf {
-        self.dir.join(&self.metadata.audio_raw_file)
     }
 
     fn transcript_path(&self) -> PathBuf {
