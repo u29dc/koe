@@ -1,6 +1,6 @@
 use crate::TranscriptSegment;
 
-const OVERLAP_WINDOW_MS: i64 = 1000;
+const MUTABLE_WINDOW_MS: i64 = 15_000;
 const SIMILARITY_THRESHOLD: f64 = 0.5;
 
 /// Ordered ledger of transcript segments with overlap-aware deduplication.
@@ -32,8 +32,19 @@ impl TranscriptLedger {
                 self.highest_end_ms = seg.end_ms;
             }
 
+            if self
+                .segments
+                .iter()
+                .any(|existing| existing.finalized && overlaps(existing, &seg))
+            {
+                continue;
+            }
+
             let mut replaced = false;
             for existing in self.segments.iter_mut() {
+                if existing.finalized {
+                    continue;
+                }
                 if overlaps(existing, &seg)
                     && text_similarity(&existing.text, &seg.text) >= SIMILARITY_THRESHOLD
                 {
@@ -54,7 +65,7 @@ impl TranscriptLedger {
         }
 
         // Finalize segments that are safely behind the overlap window.
-        let cutoff = self.highest_end_ms - OVERLAP_WINDOW_MS;
+        let cutoff = self.highest_end_ms - MUTABLE_WINDOW_MS;
         for seg in &mut self.segments {
             if seg.end_ms < cutoff {
                 seg.finalized = true;
@@ -196,9 +207,21 @@ mod tests {
         let mut ledger = TranscriptLedger::new();
         ledger.append(vec![seg(1, 0, 100, "old segment")]);
         // Push highest_end_ms far enough that the first segment is finalized.
-        ledger.append(vec![seg(2, 2000, 3000, "new segment")]);
+        ledger.append(vec![seg(2, 20_000, 21_000, "new segment")]);
         assert!(ledger.segments()[0].finalized);
         assert!(!ledger.segments()[1].finalized);
+    }
+
+    #[test]
+    fn finalized_segments_ignore_overlaps() {
+        let mut ledger = TranscriptLedger::new();
+        ledger.append(vec![seg(1, 0, 100, "old segment")]);
+        ledger.append(vec![seg(2, 20_000, 21_000, "new segment")]);
+        assert!(ledger.segments()[0].finalized);
+
+        ledger.append(vec![seg(3, 50, 150, "old segment")]);
+        assert_eq!(ledger.len(), 2);
+        assert_eq!(ledger.segments()[0].id, 1);
     }
 
     #[test]
