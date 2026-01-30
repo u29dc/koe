@@ -192,7 +192,6 @@ enum PaletteCommandId {
     SetTranscribeModel,
     SetSummarizeModel,
     EditContext,
-    ToggleTranscript,
     BrowseSessions,
     CopyTranscriptPath,
     CopyNotesPath,
@@ -291,11 +290,6 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
     let mut notes_lines = render_notes_lines(&meeting_state, &theme);
     let mut transcribe_connected = true;
     let mut transcribe_lag_ms: Option<u128> = None;
-    let mut show_transcript = if ctx.ui_config.notes_only_default {
-        false
-    } else {
-        ctx.ui_config.show_transcript
-    };
     let mut phase = MeetingPhase::Idle;
     let mut mode = UiMode::Normal;
     let mut meeting_started_at: Option<Instant> = None;
@@ -386,25 +380,21 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
 
             render_title_bar(frame, title_area, &theme);
 
-            if show_transcript {
-                let [notes_area, separator_area, transcript_area] = Layout::horizontal([
-                    Constraint::Percentage(55),
-                    Constraint::Length(1),
-                    Constraint::Percentage(45),
-                ])
-                .areas(content_area);
+            let [notes_area, separator_area, transcript_area] = Layout::horizontal([
+                Constraint::Percentage(55),
+                Constraint::Length(1),
+                Constraint::Percentage(45),
+            ])
+            .areas(content_area);
 
-                let separator = Paragraph::new(Text::from(Line::from(Span::styled(
-                    "|",
-                    Style::default().fg(theme.muted),
-                ))));
-                frame.render_widget(separator, separator_area);
+            let separator = Paragraph::new(Text::from(Line::from(Span::styled(
+                "|",
+                Style::default().fg(theme.muted),
+            ))));
+            frame.render_widget(separator, separator_area);
 
-                render_scrolled_paragraph(frame, notes_area, &notes_lines);
-                render_scrolled_paragraph(frame, transcript_area, &transcript_lines);
-            } else {
-                render_scrolled_paragraph(frame, content_area, &notes_lines);
-            }
+            render_scrolled_paragraph(frame, notes_area, &notes_lines);
+            render_scrolled_paragraph(frame, transcript_area, &transcript_lines);
 
             let footer_state = FooterState {
                 phase,
@@ -568,9 +558,6 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                             buffer: context.clone(),
                                         });
                                         continue;
-                                    }
-                                    PaletteCommandId::ToggleTranscript => {
-                                        show_transcript = !show_transcript;
                                     }
                                     PaletteCommandId::BrowseSessions => {
                                         if let Err(err) =
@@ -1177,11 +1164,6 @@ fn commands_for_phase(phase: MeetingPhase, capture_paused: bool) -> Vec<PaletteC
                 category: "setting",
             },
             PaletteCommand {
-                id: PaletteCommandId::ToggleTranscript,
-                label: "toggle transcript",
-                category: "view",
-            },
-            PaletteCommand {
                 id: PaletteCommandId::BrowseSessions,
                 label: "browse sessions",
                 category: "view",
@@ -1213,11 +1195,6 @@ fn commands_for_phase(phase: MeetingPhase, capture_paused: bool) -> Vec<PaletteC
                     id: PaletteCommandId::EditContext,
                     label: "edit context",
                     category: "setting",
-                },
-                PaletteCommand {
-                    id: PaletteCommandId::ToggleTranscript,
-                    label: "toggle transcript",
-                    category: "view",
                 },
             ];
             if capture_paused {

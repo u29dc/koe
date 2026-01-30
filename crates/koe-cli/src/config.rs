@@ -175,8 +175,8 @@ pub struct UiConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            show_transcript: false,
-            notes_only_default: true,
+            show_transcript: true,
+            notes_only_default: false,
             color_theme: "minimal".to_string(),
         }
     }

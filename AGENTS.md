@@ -29,8 +29,8 @@ koe/
 | VAD              | voice_activity_detector 0.2.1                  | Silero ONNX, 512 samples/32ms frames |
 | Local transcribe | whisper-rs 0.15.1                              | Metal acceleration                   |
 | Cloud transcribe | Groq API                                       | Whisper large-v3-turbo via ureq      |
-| Local summarize | Ollama                                         | NDJSON streaming via ureq            |
-| Cloud summarize | OpenRouter API                                 | via ureq                             |
+| Local summarize  | Ollama                                         | NDJSON streaming via ureq            |
+| Cloud summarize  | OpenRouter API                                 | via ureq                             |
 | TUI              | ratatui 0.30.0 + crossterm 0.29.0              |                                      |
 | CLI              | clap 4.5.56                                    | derive features                      |
 | HTTP             | ureq 3.1.4                                     | json + multipart features            |
@@ -354,22 +354,22 @@ Phase 5: TUI design polish
 - Target layout (split view, meeting active):
 
     ```
-    ┌──────────────────────────────────────────────────────────────────┐
-    │ ■ koe v0.0.1                              ctrl+p command palette │
-    │                                  │                               │
-    │  · They worked with that agency  │  Them: So the timeline is...  │
-    │    before — Sarah                │  Me: Yeah that works for me   │
-    │  · Han knows someone at that     │  Them: We worked with them    │
-    │    agency from a past project    │    before actually            │
-    │  · Budget is flexible up to 50k  │  Me: Oh nice, I know someone  │
-    │    — Them                        │    there from a past project  │
-    │  · Targeting Friday for v2 ship  │  Them: Budget is flexible,    │
-    │  · Han to send draft by Tuesday  │    up to 50k                  │
-    │  · Need repo access shared       │  Me: Let's target Friday      │
-    │    before EOD — Them             │  Them: Works for me           │
-    │                                  │                               │
-    │ 12:34  ▁▂▃▅▃▂▁▂▃▅▃▂  transcribe:cloud lag:1.2s chunks:42/0 segs:18      │
-    └──────────────────────────────────────────────────────────────────┘
+    ┌────────────────────────────────────────────────────────────────────┐
+    │ ■ koe v0.0.1                              ctrl+p command palette   │
+    │                                  │                                 │
+    │  · They worked with that agency  │  Them: So the timeline is...    │
+    │    before — Sarah                │  Me: Yeah that works for me     │
+    │  · Han knows someone at that     │  Them: We worked with them      │
+    │    agency from a past project    │    before actually              │
+    │  · Budget is flexible up to 50k  │  Me: Oh nice, I know someone    │
+    │    — Them                        │    there from a past project    │
+    │  · Targeting Friday for v2 ship  │  Them: Budget is flexible,      │
+    │  · Han to send draft by Tuesday  │    up to 50k                    │
+    │  · Need repo access shared       │  Me: Let's target Friday        │
+    │    before EOD — Them             │  Them: Works for me             │
+    │                                  │                                 │
+    │ 12:34  ▁▂▃▅▃▂▁▂▃▅▃▂  transcribe:cloud lag:1.2s chunks:42/0 segs:18 │
+    └────────────────────────────────────────────────────────────────────┘
     ```
 
     Title bar: accent square (U+25A0) + app name left, palette hint right.
@@ -386,8 +386,8 @@ Phase 5: TUI design polish
     │   meeting  end meeting                   │
     │   meeting  pause capture                 │
     │   meeting  force summarize               │
-    │   setting  switch transcribe mode               │
-    │   setting  switch summarize mode                │
+    │   setting  switch transcribe mode        │
+    │   setting  switch summarize mode         │
     │   setting  edit context                  │
     │      view  toggle transcript             │
     └──────────────────────────────────────────┘
