@@ -334,7 +334,7 @@ Phase 4: Latency comparison + polish
         - Rationale: JSONL for append-only streams (transcript, optional patch log), JSON/TOML for single-record snapshots (metadata/notes), Markdown only for human export.
     - [x] Crash-safe recovery: partial sessions can be reopened and exported.
         - Ensure incomplete sessions still have usable transcript/notes; metadata should include `finalized=false` and last_update timestamp for recovery tooling.
-    - [ ] Export transcript/notes on quit.
+    - [x] Export transcript/notes on quit.
         - On shutdown, persist the transcript and notes to files (e.g., `transcript.md`, `notes.json`). Ensure the export path is configurable and errors are surfaced cleanly. Do not block UI shutdown indefinitely; use a bounded export timeout.
 - Smoke tests:
     - [ ] Compare local vs cloud latency over a 3-minute session.
