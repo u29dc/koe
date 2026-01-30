@@ -20,7 +20,7 @@ pub(crate) fn build_prompt(
         .unwrap_or_default();
 
     format!(
-        "You are a meeting notes engine. Return ONLY valid JSON with this schema:\n{{\n  \"ops\": [\n    {{\"op\": \"add_key_point\", \"id\": \"kp_1\", \"text\": \"...\", \"evidence\": [1,2]}}\n  ]\n}}\n\nRules:\n- patch-only: add/update ops only, no deletes\n- stable IDs: reuse IDs when updating\n- evidence is a list of transcript segment IDs\n- if no updates, return {{\"ops\": []}}\n\n{context_block}Transcript:\n{transcript}\n\nCurrent state JSON:\n{state_json}\n"
+        "You are a meeting notes engine. Return ONLY valid JSON with this schema:\n{{\n  \"ops\": [\n    {{\"op\": \"add_key_point\", \"id\": \"kp_1\", \"text\": \"...\", \"evidence\": [1,2]}}\n  ]\n}}\n\nRules:\n- patch-only: add/update ops only, no deletes\n- stable IDs: reuse IDs when updating\n- evidence is a list of transcript segment IDs\n- if no updates, return {{\"ops\": []}}\n- keep notes minimal and information-dense, no filler or repetition\n- prefer short noun phrases; avoid full sentences when possible\n- each text is <= 120 characters and <= 1 sentence\n- return at most 5 ops per response\n\n{context_block}Transcript:\n{transcript}\n\nCurrent state JSON:\n{state_json}\n"
     )
 }
 
@@ -187,5 +187,13 @@ mod tests {
         );
         assert!(prompt.contains("keep"));
         assert!(!prompt.contains("drop"));
+    }
+
+    #[test]
+    fn build_prompt_is_information_dense() {
+        let prompt = build_prompt(&[seg(1, "alpha")], &MeetingState::default(), None);
+        assert!(prompt.contains("information-dense"));
+        assert!(prompt.contains("<= 120"));
+        assert!(prompt.contains("at most 5 ops"));
     }
 }
