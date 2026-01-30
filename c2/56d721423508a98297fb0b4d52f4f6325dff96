@@ -1,0 +1,21 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.40",
+  "base_commit_sha": "c256d721423508a98297fb0b4d52f4f6325dff96",
+  "prompts": {
+    "590200a9fad670b8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4ef6569a-038e-4fa6-b977-78195f143b0a",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 76,
+      "total_deletions": 0,
+      "accepted_lines": 74,
+      "overriden_lines": 1
+    }
+  }
+}
