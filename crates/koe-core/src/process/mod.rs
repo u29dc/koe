@@ -21,6 +21,7 @@ const RESAMPLE_CHUNK: usize = 480;
 /// Audio processor: drains capture ring buffers, resamples, runs VAD, and emits chunks.
 pub struct AudioProcessor {
     running: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -161,6 +162,8 @@ impl AudioProcessor {
         let (chunk_tx, chunk_rx) = chunk_channel(4);
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = Arc::clone(&running);
+        let paused = Arc::new(AtomicBool::new(false));
+        let paused_clone = Arc::clone(&paused);
 
         let mut system_pipeline = StreamPipeline::new(AudioSource::System)?;
         let mut mic_pipeline = StreamPipeline::new(AudioSource::Microphone)?;
@@ -171,6 +174,22 @@ impl AudioProcessor {
                 let mut raw_sink = raw_sink;
                 while running_clone.load(Ordering::Relaxed) {
                     let mut had_data = false;
+
+                    if paused_clone.load(Ordering::Relaxed) {
+                        if capture.try_recv_system().is_some() {
+                            stats.inc_frames_captured();
+                            had_data = true;
+                        }
+                        if capture.try_recv_mic().is_some() {
+                            stats.inc_frames_captured();
+                            had_data = true;
+                        }
+
+                        if !had_data {
+                            thread::sleep(std::time::Duration::from_millis(2));
+                        }
+                        continue;
+                    }
 
                     if let Some(frame) = capture.try_recv_system() {
                         stats.inc_frames_captured();
@@ -210,10 +229,23 @@ impl AudioProcessor {
         Ok((
             Self {
                 running,
+                paused,
                 thread: Some(thread),
             },
             chunk_rx,
         ))
+    }
+
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::Relaxed);
+    }
+
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::Relaxed);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
     }
 
     /// Signal the processor to stop and wait for the thread to finish.
