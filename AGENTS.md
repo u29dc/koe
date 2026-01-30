@@ -190,7 +190,7 @@ Phase 0: Quality gate wiring
         - Ensure config file permissions are restricted (0600); warn if file is group/world readable.
         - Add a config version field and lightweight migration path for new fields.
         - Define a single runtime entry point: `koe` runs the TUI; `koe init` and `koe config` handle setup. Avoid introducing additional top-level commands unless required.
-    - [ ] `koe config` subcommand reads/writes config with validation and redacts secrets in terminal output.
+    - [x] `koe config` subcommand reads/writes config with validation and redacts secrets in terminal output.
         - Support `--print` (redact keys), `--set key=value` (dotted paths like `asr.provider=whisper`), and `--edit` (opens in $EDITOR) for quick changes.
         - Validate enums (provider names), file paths, and required keys; surface errors with actionable guidance.
         - Define precedence: CLI flags > config file > env vars (env vars optional), and keep precedence consistent across commands.

@@ -1,4 +1,5 @@
 mod config;
+mod config_cmd;
 mod init;
 mod tui;
 
@@ -26,6 +27,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Init(init::InitArgs),
+    Config(config_cmd::ConfigArgs),
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -105,12 +107,23 @@ fn main() {
         }
     };
 
-    if let Some(Command::Init(args)) = cli.command {
-        if let Err(e) = init::run(&args) {
-            eprintln!("init failed: {e}");
-            std::process::exit(1);
+    if let Some(command) = cli.command {
+        match command {
+            Command::Init(args) => {
+                if let Err(e) = init::run(&args) {
+                    eprintln!("init failed: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
+            Command::Config(args) => {
+                if let Err(e) = config_cmd::run(&args, &paths) {
+                    eprintln!("config failed: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
         }
-        return;
     }
 
     let run = cli.run.resolve(&config);

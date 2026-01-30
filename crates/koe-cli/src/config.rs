@@ -19,6 +19,8 @@ pub enum ConfigError {
     Parse(#[from] toml::de::Error),
     #[error("config serialize error: {0}")]
     Serialize(#[from] toml::ser::Error),
+    #[error("config validation error: {0}")]
+    Validation(String),
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +195,106 @@ impl Config {
         write_atomic(&paths.config_path, content.as_bytes())?;
         Ok(())
     }
+
+    pub fn redacted(&self) -> Self {
+        let mut redacted = self.clone();
+        if !redacted.asr.api_key.trim().is_empty() {
+            redacted.asr.api_key = "<redacted>".to_string();
+        }
+        if !redacted.summarizer.api_key.trim().is_empty() {
+            redacted.summarizer.api_key = "<redacted>".to_string();
+        }
+        redacted
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        match self.asr.provider.as_str() {
+            "whisper" | "groq" => {}
+            other => {
+                return Err(ConfigError::Validation(format!(
+                    "asr.provider must be whisper or groq (got {other})"
+                )));
+            }
+        }
+
+        match self.summarizer.provider.as_str() {
+            "ollama" | "openrouter" => {}
+            other => {
+                return Err(ConfigError::Validation(format!(
+                    "summarizer.provider must be ollama or openrouter (got {other})"
+                )));
+            }
+        }
+
+        if self.audio.sample_rate == 0 {
+            return Err(ConfigError::Validation(
+                "audio.sample_rate must be greater than 0".into(),
+            ));
+        }
+        if self.audio.channels == 0 {
+            return Err(ConfigError::Validation(
+                "audio.channels must be greater than 0".into(),
+            ));
+        }
+        if self.audio.sources.is_empty() {
+            return Err(ConfigError::Validation(
+                "audio.sources must include at least one source".into(),
+            ));
+        }
+        for source in &self.audio.sources {
+            match source.as_str() {
+                "system" | "microphone" | "mixed" => {}
+                other => {
+                    return Err(ConfigError::Validation(format!(
+                        "audio.sources includes invalid value {other}"
+                    )));
+                }
+            }
+        }
+
+        if self.asr.model.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "asr.model must not be empty".into(),
+            ));
+        }
+        if self.asr.provider == "whisper"
+            && looks_like_path(self.asr.model.as_str())
+            && !Path::new(&self.asr.model).exists()
+        {
+            return Err(ConfigError::Validation(format!(
+                "asr.model path not found: {}",
+                self.asr.model
+            )));
+        }
+        if self.asr.provider == "groq" && self.asr.api_key.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "asr.api_key required when asr.provider=groq".into(),
+            ));
+        }
+
+        if self.summarizer.model.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "summarizer.model must not be empty".into(),
+            ));
+        }
+        if self.summarizer.prompt_profile.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "summarizer.prompt_profile must not be empty".into(),
+            ));
+        }
+        if self.summarizer.provider == "openrouter" && self.summarizer.api_key.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "summarizer.api_key required when summarizer.provider=openrouter".into(),
+            ));
+        }
+        if self.ui.color_theme.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "ui.color_theme must not be empty".into(),
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 fn ensure_dirs(paths: &ConfigPaths) -> Result<(), ConfigError> {
@@ -235,6 +337,10 @@ fn warn_if_loose_permissions(path: &Path) -> Result<(), ConfigError> {
         }
     }
     Ok(())
+}
+
+fn looks_like_path(value: &str) -> bool {
+    value.ends_with(".bin") || value.contains('/') || value.contains(std::path::MAIN_SEPARATOR)
 }
 
 #[cfg(test)]
@@ -290,5 +396,22 @@ api_key = ""
         let updated = fs::read_to_string(&paths.config_path).unwrap();
         assert!(updated.contains("version = 1"));
         assert!(updated.contains("[summarizer]"));
+    }
+
+    #[test]
+    fn redacted_hides_api_keys() {
+        let mut config = Config::default();
+        config.asr.api_key = "secret".to_string();
+        config.summarizer.api_key = "secret2".to_string();
+        let redacted = config.redacted();
+        assert_eq!(redacted.asr.api_key, "<redacted>");
+        assert_eq!(redacted.summarizer.api_key, "<redacted>");
+    }
+
+    #[test]
+    fn validate_rejects_bad_provider() {
+        let mut config = Config::default();
+        config.asr.provider = "bad".to_string();
+        assert!(config.validate().is_err());
     }
 }
