@@ -31,6 +31,7 @@ pub enum SessionError {
 pub struct SessionMetadata {
     pub id: String,
     pub start_time: String,
+    pub last_update: String,
     pub end_time: Option<String>,
     pub finalized: bool,
     pub context: Option<String>,
@@ -38,6 +39,9 @@ pub struct SessionMetadata {
     pub title: Option<String>,
     pub description: Option<String>,
     pub tags: Vec<String>,
+    pub audio_sample_rate_hz: u32,
+    pub audio_channels: u16,
+    pub audio_sources: Vec<String>,
     pub context_file: String,
     pub audio_raw_file: String,
     pub audio_wav_file: String,
@@ -49,17 +53,24 @@ pub struct SessionMetadata {
     pub summarizer_model: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionMetadataInput {
+    pub context: Option<String>,
+    pub participants: Vec<String>,
+    pub audio_sample_rate_hz: u32,
+    pub audio_channels: u16,
+    pub audio_sources: Vec<String>,
+    pub asr_provider: String,
+    pub asr_model: String,
+    pub summarizer_provider: String,
+    pub summarizer_model: String,
+}
+
 impl SessionMetadata {
-    pub fn new(
-        context: Option<String>,
-        participants: Vec<String>,
-        asr_provider: String,
-        asr_model: String,
-        summarizer_provider: String,
-        summarizer_model: String,
-    ) -> Result<Self, SessionError> {
+    pub fn new(input: SessionMetadataInput) -> Result<Self, SessionError> {
         let id = Uuid::now_v7().to_string();
         let start_time = OffsetDateTime::now_utc().format(&Rfc3339)?;
+        let last_update = start_time.clone();
         let context_file = file_name(CONTEXT_PREFIX, "txt", &id);
         let audio_raw_file = file_name(AUDIO_PREFIX, "raw", &id);
         let audio_wav_file = file_name(AUDIO_PREFIX, "wav", &id);
@@ -68,22 +79,26 @@ impl SessionMetadata {
         Ok(Self {
             id,
             start_time,
+            last_update,
             end_time: None,
             finalized: false,
-            context,
-            participants,
+            context: input.context,
+            participants: input.participants,
             title: None,
             description: None,
             tags: Vec::new(),
+            audio_sample_rate_hz: input.audio_sample_rate_hz,
+            audio_channels: input.audio_channels,
+            audio_sources: input.audio_sources,
             context_file,
             audio_raw_file,
             audio_wav_file,
             transcript_file,
             notes_file,
-            asr_provider,
-            asr_model,
-            summarizer_provider,
-            summarizer_model,
+            asr_provider: input.asr_provider,
+            asr_model: input.asr_model,
+            summarizer_provider: input.summarizer_provider,
+            summarizer_model: input.summarizer_model,
         })
     }
 }
@@ -112,7 +127,12 @@ impl SessionHandle {
         write_metadata(&metadata_path, &metadata)?;
         fs::write(audio_raw_path, [])?;
         fs::write(transcript_path, [])?;
-        fs::write(notes_path, [])?;
+        let notes_snapshot = NotesSnapshot {
+            updated_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
+            state: MeetingState::default(),
+        };
+        let notes_payload = serde_json::to_string_pretty(&notes_snapshot)?;
+        write_atomic(&notes_path, notes_payload.as_bytes())?;
 
         Ok(Self {
             dir,
@@ -132,7 +152,10 @@ impl SessionHandle {
             .open(self.audio_raw_path())?)
     }
 
-    pub fn append_transcript(&self, segments: &[TranscriptSegment]) -> Result<(), SessionError> {
+    pub fn append_transcript(
+        &mut self,
+        segments: &[TranscriptSegment],
+    ) -> Result<(), SessionError> {
         if segments.is_empty() {
             return Ok(());
         }
@@ -140,20 +163,29 @@ impl SessionHandle {
             .append(true)
             .open(self.transcript_path())?;
         for segment in segments {
-            let line = serde_json::to_string(segment)?;
+            let record = TranscriptRecord::from_segment(segment);
+            let line = serde_json::to_string(&record)?;
             file.write_all(line.as_bytes())?;
             file.write_all(b"\n")?;
         }
+        self.touch_metadata()?;
         Ok(())
     }
 
-    pub fn write_notes(&self, state: &MeetingState) -> Result<(), SessionError> {
-        let payload = serde_json::to_string_pretty(state)?;
-        write_atomic(&self.notes_path(), payload.as_bytes())
+    pub fn write_notes(&mut self, state: &MeetingState) -> Result<(), SessionError> {
+        let snapshot = NotesSnapshot {
+            updated_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
+            state: state.clone(),
+        };
+        let payload = serde_json::to_string_pretty(&snapshot)?;
+        write_atomic(&self.notes_path(), payload.as_bytes())?;
+        self.touch_metadata()?;
+        Ok(())
     }
 
     pub fn update_context(&mut self, context: String) -> Result<(), SessionError> {
         self.metadata.context = Some(context.clone());
+        self.metadata.last_update = OffsetDateTime::now_utc().format(&Rfc3339)?;
         write_atomic(&self.context_path, context.as_bytes())?;
         write_metadata(&self.metadata_path, &self.metadata)?;
         Ok(())
@@ -170,10 +202,52 @@ impl SessionHandle {
     fn notes_path(&self) -> PathBuf {
         self.dir.join(&self.metadata.notes_file)
     }
+
+    fn touch_metadata(&mut self) -> Result<(), SessionError> {
+        self.metadata.last_update = OffsetDateTime::now_utc().format(&Rfc3339)?;
+        write_metadata(&self.metadata_path, &self.metadata)?;
+        Ok(())
+    }
 }
 
 fn file_name(prefix: &str, ext: &str, id: &str) -> String {
     format!("{prefix}-{id}.{ext}")
+}
+
+#[derive(Serialize)]
+struct TranscriptRecord {
+    id: u64,
+    start_ms: i64,
+    end_ms: i64,
+    speaker: Option<String>,
+    text: String,
+    finalized: bool,
+    source: String,
+}
+
+impl TranscriptRecord {
+    fn from_segment(segment: &TranscriptSegment) -> Self {
+        let source = match segment.speaker.as_deref() {
+            Some("Me") => "microphone",
+            Some("Them") => "system",
+            _ => "unknown",
+        };
+        Self {
+            id: segment.id,
+            start_ms: segment.start_ms,
+            end_ms: segment.end_ms,
+            speaker: segment.speaker.clone(),
+            text: segment.text.clone(),
+            finalized: segment.finalized,
+            source: source.to_string(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct NotesSnapshot {
+    updated_at: String,
+    state: MeetingState,
 }
 
 fn write_metadata(path: &Path, metadata: &SessionMetadata) -> Result<(), SessionError> {

@@ -5,7 +5,7 @@ pub mod vad;
 
 use crate::capture::AudioCapture;
 use crate::error::ProcessError;
-use crate::types::{AudioSource, CaptureStats};
+use crate::types::{AudioFrame, AudioSource, CaptureStats};
 use chunker::Chunker;
 pub use queue::ChunkRecvTimeoutError;
 use queue::{ChunkReceiver, ChunkSender, SendOutcome, chunk_channel};
@@ -23,6 +23,8 @@ pub struct AudioProcessor {
     running: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
+
+pub type RawAudioSink = Box<dyn FnMut(AudioSource, &AudioFrame) + Send>;
 
 struct StreamPipeline {
     resampler: ResampleConverter,
@@ -152,6 +154,7 @@ impl AudioProcessor {
     pub fn start(
         mut capture: Box<dyn AudioCapture>,
         stats: CaptureStats,
+        raw_sink: Option<RawAudioSink>,
     ) -> Result<(Self, ChunkReceiver), ProcessError> {
         capture.start().map_err(ProcessError::Capture)?;
 
@@ -165,11 +168,15 @@ impl AudioProcessor {
         let thread = thread::Builder::new()
             .name("koe-audio-processor".into())
             .spawn(move || {
+                let mut raw_sink = raw_sink;
                 while running_clone.load(Ordering::Relaxed) {
                     let mut had_data = false;
 
                     if let Some(frame) = capture.try_recv_system() {
                         stats.inc_frames_captured();
+                        if let Some(ref mut sink) = raw_sink {
+                            sink(AudioSource::System, &frame);
+                        }
                         system_pipeline.process(
                             &frame.samples_f32,
                             frame.pts_ns,
@@ -181,6 +188,9 @@ impl AudioProcessor {
 
                     if let Some(frame) = capture.try_recv_mic() {
                         stats.inc_frames_captured();
+                        if let Some(ref mut sink) = raw_sink {
+                            sink(AudioSource::Microphone, &frame);
+                        }
                         mic_pipeline.process(&frame.samples_f32, frame.pts_ns, &chunk_tx, &stats);
                         had_data = true;
                     }

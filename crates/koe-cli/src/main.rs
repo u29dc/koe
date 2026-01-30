@@ -9,9 +9,10 @@ use config::{Config, ConfigPaths};
 use koe_core::asr::{AsrProvider, create_asr};
 use koe_core::capture::create_capture;
 use koe_core::process::ChunkRecvTimeoutError;
-use koe_core::types::{AudioChunk, AudioSource, CaptureStats, NotesPatch};
+use koe_core::types::{AudioFrame, AudioSource, CaptureStats, NotesPatch};
 use session::SessionHandle;
-use std::io::Write;
+use std::collections::VecDeque;
+use std::io::{BufWriter, Write};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -158,22 +159,6 @@ fn main() {
     let stats_display = stats.clone();
     let models_dir = paths.models_dir.clone();
 
-    let capture = match create_capture(stats.clone()) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("capture init failed: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let (processor, chunk_rx) = match koe_core::process::AudioProcessor::start(capture, stats) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("processor start failed: {e}");
-            std::process::exit(1);
-        }
-    };
-
     let whisper_model_env = std::env::var("KOE_WHISPER_MODEL").ok();
     let groq_model_env = std::env::var("KOE_GROQ_MODEL").ok();
     let mut whisper_model = match run.asr.as_str() {
@@ -204,8 +189,7 @@ fn main() {
         }
     };
 
-    let asr_name = asr.name().to_string();
-    let session = match create_session(&paths, &run, &whisper_model, &groq_model) {
+    let session = match create_session(&paths, &run, &config, &whisper_model, &groq_model) {
         Ok(session) => session,
         Err(err) => {
             eprintln!("session init failed: {err}");
@@ -219,6 +203,32 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let mut raw_writer = RawAudioWriter::new(audio_raw);
+
+    let capture = match create_capture(stats.clone()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("capture init failed: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let raw_sink: Option<koe_core::process::RawAudioSink> = Some(Box::new(move |source, frame| {
+        if let Err(err) = raw_writer.write_frame(source, frame) {
+            eprintln!("audio write failed: {err}");
+        }
+    }));
+
+    let (processor, chunk_rx) =
+        match koe_core::process::AudioProcessor::start(capture, stats, raw_sink) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("processor start failed: {e}");
+                std::process::exit(1);
+            }
+        };
+
+    let asr_name = asr.name().to_string();
     let (ui_tx, ui_rx) = mpsc::channel();
     let _ = ui_tx.send(UiEvent::NotesPatch(NotesPatch { ops: Vec::new() }));
     let (asr_cmd_tx, asr_cmd_rx) = mpsc::channel();
@@ -230,7 +240,6 @@ fn main() {
             let mut whisper_model = whisper_model;
             let groq_model = groq_model;
             let models_dir = models_dir.clone();
-            let mut audio_raw = audio_raw;
 
             let send_status = |name: String, connected: bool| {
                 let _ = ui_tx.send(UiEvent::AsrStatus { name, connected });
@@ -283,9 +292,6 @@ fn main() {
                     Err(ChunkRecvTimeoutError::Timeout) => continue,
                     Err(ChunkRecvTimeoutError::Disconnected) => break,
                 };
-                if let Err(err) = append_audio_raw(&mut audio_raw, &chunk) {
-                    eprintln!("audio write failed: {err}");
-                }
 
                 let (mut segments, elapsed) = match transcribe_with_latency(asr.as_mut(), &chunk) {
                     Ok(result) => result,
@@ -395,6 +401,79 @@ fn model_for_provider<'a>(
     }
 }
 
+struct RawAudioWriter {
+    file: BufWriter<std::fs::File>,
+    system: VecDeque<f32>,
+    mic: VecDeque<f32>,
+    pending_flush_samples: usize,
+}
+
+impl RawAudioWriter {
+    const FLUSH_SAMPLES: usize = 48_000;
+
+    fn new(file: std::fs::File) -> Self {
+        Self {
+            file: BufWriter::new(file),
+            system: VecDeque::new(),
+            mic: VecDeque::new(),
+            pending_flush_samples: 0,
+        }
+    }
+
+    fn write_frame(&mut self, source: AudioSource, frame: &AudioFrame) -> std::io::Result<()> {
+        match source {
+            AudioSource::System => self.system.extend(frame.samples_f32.iter().copied()),
+            AudioSource::Microphone => self.mic.extend(frame.samples_f32.iter().copied()),
+            AudioSource::Mixed => {
+                self.drain_buffers()?;
+                self.write_samples(&frame.samples_f32)?;
+                return Ok(());
+            }
+        }
+        self.drain_buffers()
+    }
+
+    fn drain_buffers(&mut self) -> std::io::Result<()> {
+        let mix_len = self.system.len().min(self.mic.len());
+        for _ in 0..mix_len {
+            let left = self.system.pop_front().unwrap_or(0.0);
+            let right = self.mic.pop_front().unwrap_or(0.0);
+            let mixed = ((left + right) * 0.5).clamp(-1.0, 1.0);
+            self.write_sample(mixed)?;
+        }
+
+        if self.mic.is_empty() {
+            while let Some(sample) = self.system.pop_front() {
+                self.write_sample(sample)?;
+            }
+        }
+        if self.system.is_empty() {
+            while let Some(sample) = self.mic.pop_front() {
+                self.write_sample(sample)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn write_samples(&mut self, samples: &[f32]) -> std::io::Result<()> {
+        for sample in samples {
+            self.write_sample(*sample)?;
+        }
+        Ok(())
+    }
+
+    fn write_sample(&mut self, sample: f32) -> std::io::Result<()> {
+        self.file.write_all(&sample.to_le_bytes())?;
+        self.pending_flush_samples += 1;
+        if self.pending_flush_samples >= Self::FLUSH_SAMPLES {
+            self.file.flush()?;
+            self.pending_flush_samples = 0;
+        }
+        Ok(())
+    }
+}
+
 fn transcribe_with_latency(
     asr: &mut dyn AsrProvider,
     chunk: &koe_core::types::AudioChunk,
@@ -402,13 +481,6 @@ fn transcribe_with_latency(
     let start = Instant::now();
     let segments = asr.transcribe(chunk)?;
     Ok((segments, start.elapsed().as_millis()))
-}
-
-fn append_audio_raw(file: &mut std::fs::File, chunk: &AudioChunk) -> std::io::Result<()> {
-    for sample in &chunk.pcm_mono_f32 {
-        file.write_all(&sample.to_le_bytes())?;
-    }
-    Ok(())
 }
 
 fn apply_config_env(config: &Config, run: &ResolvedRunArgs) {
@@ -434,6 +506,7 @@ fn apply_config_env(config: &Config, run: &ResolvedRunArgs) {
 fn create_session(
     paths: &ConfigPaths,
     run: &ResolvedRunArgs,
+    config: &Config,
     whisper_model: &Option<String>,
     groq_model: &Option<String>,
 ) -> Result<SessionHandle, session::SessionError> {
@@ -443,14 +516,17 @@ fn create_session(
         _ => String::new(),
     };
     let summarizer_model = run.model_sum.clone().unwrap_or_default();
-    let metadata = session::SessionMetadata::new(
-        run.context.clone(),
-        run.participants.clone(),
-        run.asr.clone(),
+    let metadata = session::SessionMetadata::new(session::SessionMetadataInput {
+        context: run.context.clone(),
+        participants: run.participants.clone(),
+        audio_sample_rate_hz: config.audio.sample_rate,
+        audio_channels: config.audio.channels,
+        audio_sources: config.audio.sources.clone(),
+        asr_provider: run.asr.clone(),
         asr_model,
-        run.summarizer.clone(),
+        summarizer_provider: run.summarizer.clone(),
         summarizer_model,
-    )?;
+    })?;
     session::SessionHandle::start(paths, metadata)
 }
 
