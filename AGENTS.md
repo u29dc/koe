@@ -155,10 +155,11 @@ pub trait SummarizerProvider: Send {
 
 ## 7. Local Setup and Testing
 
-- Set `.env` with `GROQ_API_KEY=...` and `KOE_WHISPER_MODEL=/Users/han/.koe/models/ggml-base.en.bin`.
-- Download model and update `.env`: `./scripts/koe-init.sh` (writes to `~/.koe/models`).
-- Run local or cloud: `./scripts/koe-whisper.sh` or `./scripts/koe-groq.sh`.
-- Alternate model: `./scripts/koe-init.sh --model small`, then `./scripts/koe-whisper.sh`.
+- Run `bun run koe -- init` to download a Whisper model and write `~/.koe/config.toml` (interactive onboarding for ASR/summarizer provider, model, and API keys).
+- Alternate model: `bun run koe -- init --model small`.
+- Run local ASR: `bun run koe -- --asr whisper`.
+- Run cloud ASR: `bun run koe -- --asr groq`.
+- Environment variables (`GROQ_API_KEY`, `OPENROUTER_API_KEY`) are optional overrides; `~/.koe/config.toml` is canonical.
 
 ## 8. Quality
 
