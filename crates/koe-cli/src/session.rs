@@ -8,11 +8,10 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
-const CONTEXT_FILE: &str = "context.txt";
-const AUDIO_RAW_FILE: &str = "audio.raw";
-const AUDIO_WAV_FILE: &str = "audio.wav";
-const TRANSCRIPT_FILE: &str = "transcript.jsonl";
-const NOTES_FILE: &str = "notes.json";
+const CONTEXT_PREFIX: &str = "context";
+const AUDIO_PREFIX: &str = "audio";
+const TRANSCRIPT_PREFIX: &str = "transcript";
+const NOTES_PREFIX: &str = "notes";
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -32,6 +31,9 @@ pub struct SessionMetadata {
     pub finalized: bool,
     pub context: Option<String>,
     pub participants: Vec<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub tags: Vec<String>,
     pub context_file: String,
     pub audio_raw_file: String,
     pub audio_wav_file: String,
@@ -54,6 +56,11 @@ impl SessionMetadata {
     ) -> Result<Self, SessionError> {
         let id = Uuid::now_v7().to_string();
         let start_time = OffsetDateTime::now_utc().format(&Rfc3339)?;
+        let context_file = file_name(CONTEXT_PREFIX, "txt", &id);
+        let audio_raw_file = file_name(AUDIO_PREFIX, "raw", &id);
+        let audio_wav_file = file_name(AUDIO_PREFIX, "wav", &id);
+        let transcript_file = file_name(TRANSCRIPT_PREFIX, "jsonl", &id);
+        let notes_file = file_name(NOTES_PREFIX, "json", &id);
         Ok(Self {
             id,
             start_time,
@@ -61,11 +68,14 @@ impl SessionMetadata {
             finalized: false,
             context,
             participants,
-            context_file: CONTEXT_FILE.to_string(),
-            audio_raw_file: AUDIO_RAW_FILE.to_string(),
-            audio_wav_file: AUDIO_WAV_FILE.to_string(),
-            transcript_file: TRANSCRIPT_FILE.to_string(),
-            notes_file: NOTES_FILE.to_string(),
+            title: None,
+            description: None,
+            tags: Vec::new(),
+            context_file,
+            audio_raw_file,
+            audio_wav_file,
+            transcript_file,
+            notes_file,
             asr_provider,
             asr_model,
             summarizer_provider,
@@ -87,11 +97,17 @@ impl SessionHandle {
         let dir = paths.sessions_dir.join(&metadata.id);
         fs::create_dir_all(&dir)?;
         let metadata_path = dir.join("metadata.toml");
-        let context_path = dir.join(CONTEXT_FILE);
+        let context_path = dir.join(&metadata.context_file);
+        let audio_raw_path = dir.join(&metadata.audio_raw_file);
+        let transcript_path = dir.join(&metadata.transcript_file);
+        let notes_path = dir.join(&metadata.notes_file);
 
         let context_value = metadata.context.clone().unwrap_or_default();
         write_atomic(&context_path, context_value.as_bytes())?;
         write_metadata(&metadata_path, &metadata)?;
+        fs::write(audio_raw_path, [])?;
+        fs::write(transcript_path, [])?;
+        fs::write(notes_path, [])?;
 
         Ok(Self {
             metadata_path,
@@ -110,6 +126,10 @@ impl SessionHandle {
         write_metadata(&self.metadata_path, &self.metadata)?;
         Ok(())
     }
+}
+
+fn file_name(prefix: &str, ext: &str, id: &str) -> String {
+    format!("{prefix}-{id}.{ext}")
 }
 
 fn write_metadata(path: &Path, metadata: &SessionMetadata) -> Result<(), SessionError> {

@@ -317,7 +317,7 @@ Phase 4: Latency comparison + polish
 - Done criteria:
     - [x] Status bar shows ASR lag, drops, and provider.
         - Extend the status bar to include ASR latency, active provider, and capture drop metrics. Keep the layout fixed width to avoid jitter as values change. This should be updated from the same event stream as transcript updates.
-    - [ ] Sessions are persisted under `~/.koe/sessions/{uuidv7}/` with rolling checkpoints.
+    - [x] Sessions are persisted under `~/.koe/sessions/{uuidv7}/` with rolling checkpoints.
         - Create a new session directory at start with `metadata.toml` (or JSON) containing: id, start_time, end_time (nullable), finalized flag, asr/summarizer providers, model names, file names.
         - Keep schema extensible for future fields: title, description, participants, tags; do not require them yet.
         - Use UUIDv7 for session id and include it in filenames and metadata for easy correlation.
