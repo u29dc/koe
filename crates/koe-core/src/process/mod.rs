@@ -1,15 +1,16 @@
 pub mod chunker;
+mod queue;
 pub mod resample;
 pub mod vad;
 
 use crate::capture::AudioCapture;
 use crate::error::ProcessError;
-use crate::types::{AudioChunk, AudioSource, CaptureStats};
+use crate::types::{AudioSource, CaptureStats};
 use chunker::Chunker;
+use queue::{ChunkReceiver, ChunkSender, SendOutcome, chunk_channel};
 use resample::ResampleConverter;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
 use vad::VadDetector;
 
@@ -45,7 +46,7 @@ impl StreamPipeline {
         &mut self,
         input_48k: &[f32],
         pts_ns: i128,
-        chunk_tx: &SyncSender<AudioChunk>,
+        chunk_tx: &ChunkSender,
         stats: &CaptureStats,
     ) {
         // Prepend remainder and feed complete chunks to resampler
@@ -74,12 +75,12 @@ impl StreamPipeline {
 
             if let Some(chunk) = self.chunker.push(frame, pts_ns, is_speech) {
                 stats.inc_chunks_emitted();
-                match chunk_tx.try_send(chunk) {
-                    Ok(()) => {}
-                    Err(TrySendError::Full(_)) => {
+                match chunk_tx.send_drop_oldest(chunk) {
+                    SendOutcome::Sent => {}
+                    SendOutcome::DroppedOldest => {
                         stats.inc_chunks_dropped();
                     }
-                    Err(TrySendError::Disconnected(_)) => return,
+                    SendOutcome::Disconnected => return,
                 }
             }
 
@@ -88,10 +89,12 @@ impl StreamPipeline {
         self.vad_remainder.drain(..offset);
     }
 
-    fn flush(&mut self, chunk_tx: &SyncSender<AudioChunk>, stats: &CaptureStats) {
+    fn flush(&mut self, chunk_tx: &ChunkSender, stats: &CaptureStats) {
         if let Some(chunk) = self.chunker.flush() {
             stats.inc_chunks_emitted();
-            let _ = chunk_tx.try_send(chunk);
+            if chunk_tx.send_drop_oldest(chunk) == SendOutcome::DroppedOldest {
+                stats.inc_chunks_dropped();
+            }
         }
     }
 }
@@ -101,10 +104,10 @@ impl AudioProcessor {
     pub fn start(
         mut capture: Box<dyn AudioCapture>,
         stats: CaptureStats,
-    ) -> Result<(Self, std::sync::mpsc::Receiver<AudioChunk>), ProcessError> {
+    ) -> Result<(Self, ChunkReceiver), ProcessError> {
         capture.start().map_err(ProcessError::Capture)?;
 
-        let (chunk_tx, chunk_rx) = std::sync::mpsc::sync_channel(4);
+        let (chunk_tx, chunk_rx) = chunk_channel(4);
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = Arc::clone(&running);
 

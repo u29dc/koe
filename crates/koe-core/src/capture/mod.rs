@@ -2,7 +2,7 @@ mod handler;
 mod sck;
 
 use crate::error::CaptureError;
-use crate::types::AudioFrame;
+use crate::types::{AudioFrame, CaptureStats};
 
 /// Trait for audio capture backends.
 pub trait AudioCapture: Send {
@@ -13,6 +13,6 @@ pub trait AudioCapture: Send {
 }
 
 /// Create the platform-specific audio capture backend.
-pub fn create_capture() -> Result<Box<dyn AudioCapture>, CaptureError> {
-    Ok(Box::new(sck::SckCapture::new()?))
+pub fn create_capture(stats: CaptureStats) -> Result<Box<dyn AudioCapture>, CaptureError> {
+    Ok(Box::new(sck::SckCapture::new(stats)?))
 }

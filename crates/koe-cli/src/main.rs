@@ -57,7 +57,7 @@ fn main() {
     let stats = CaptureStats::new();
     let stats_display = stats.clone();
 
-    let capture = match create_capture() {
+    let capture = match create_capture(stats.clone()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("capture init failed: {e}");

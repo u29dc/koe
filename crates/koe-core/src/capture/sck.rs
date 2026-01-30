@@ -1,7 +1,7 @@
 use crate::capture::AudioCapture;
 use crate::capture::handler::{self, AudioRing};
 use crate::error::CaptureError;
-use crate::types::AudioFrame;
+use crate::types::{AudioFrame, CaptureStats};
 use screencapturekit::shareable_content::SCShareableContent;
 use screencapturekit::stream::configuration::SCStreamConfiguration;
 use screencapturekit::stream::content_filter::SCContentFilter;
@@ -18,9 +18,9 @@ pub struct SckCapture {
 }
 
 impl SckCapture {
-    pub fn new() -> Result<Self, CaptureError> {
+    pub fn new(stats: CaptureStats) -> Result<Self, CaptureError> {
         let (system_handler, mic_handler, system_ring, mic_ring) =
-            handler::create_output_handlers();
+            handler::create_output_handlers(stats);
 
         // Enumerate displays
         let content =

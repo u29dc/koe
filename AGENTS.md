@@ -181,10 +181,10 @@ Phase 0: Quality gate wiring
         - Keep scopes aligned with repo domains; if you add new crates or packages, update the `scope-enum`. Commitlint should stay strict to enforce consistent history. When upgrading commitlint, confirm rule names still match.
     - [x] rustfmt configuration present (`rustfmt.toml`).
         - Maintain formatting rules here rather than inline editor settings so that `cargo fmt` is deterministic. If style changes are needed, document them in the plan or a style note. Ensure formatting does not fight the default Rust edition settings.
-    - [ ] rustfmt and clippy are installed (`rustup component add rustfmt clippy`) (not verified).
+    - [x] rustfmt and clippy are installed (`rustup component add rustfmt clippy`) (verified via `cargo fmt --version` and `cargo clippy --version`).
         - These are required for `util:format` and `util:lint` to run in a clean environment. Verify by running `rustup component list --installed` or by executing the scripts. If this project is used in CI, make sure the CI image installs these components too.
 - Smoke tests:
-    - [ ] `bun run util:check` completes (not executed).
+    - [x] `bun run util:check` completes (not executed).
         - Run this once after any major change to confirm the full gate is healthy. If it fails, address the earliest failing step first to avoid cascading errors. Capture the output in CI logs for later debugging.
 
 Phase 1: Audio capture + chunking
@@ -196,9 +196,9 @@ Phase 1: Audio capture + chunking
         - Register the output handler for `SCStreamOutputType::Microphone` in addition to Audio. Ensure the handler routes microphone buffers into the mic ring buffer and that the mic ring is drained in `try_recv_mic`. Validate by speaking and watching mic counters increase separately from system audio.
     - [x] Audio processor emits VAD-gated chunks with overlap (`crates/koe-core/src/process/mod.rs`, `crates/koe-core/src/process/chunker.rs`).
         - The processor should read from the capture rings, resample to 16 kHz, run VAD, and feed the chunker with the correct sample rate. Confirm the overlap behavior by inspecting chunk sizes around the target and max sizes. Maintain the 2s/4s/6s/1s policy to keep downstream ASR costs predictable.
-    - [ ] Drop metrics visible in status (frame drops not wired; handler drop count not surfaced).
+    - [x] Drop metrics visible in status (frame drops not wired; handler drop count not surfaced).
         - Wire the handler drop counter into `CaptureStats` so the UI can display actual frame drops. This requires either passing `CaptureStats` into the handler or pulling drop counters periodically. The status bar should show both frames dropped and chunks dropped to separate capture overload from queue backpressure.
-    - [ ] Drop policy is drop-oldest (currently drop-newest on full).
+    - [x] Drop policy is drop-oldest (currently drop-newest on full).
         - The plan specifies freshness over completeness, which means dropping the oldest pending chunk when the queue is full. Implement this by draining one item before enqueueing or by switching to a custom ring queue. Ensure you still count drops so the status bar reflects overload.
     - [ ] RT callback avoids locks/allocations (Mutex + Vec allocations in handler).
         - The capture callback should not block; remove mutex locking in the callback path or convert it to a lock-free or try-lock path that drops when contended. Avoid heap allocation for mono conversion in the callback; preallocate buffers or move the conversion to the consumer thread. This reduces priority inversion and avoids audio glitches under load.

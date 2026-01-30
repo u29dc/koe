@@ -1,3 +1,4 @@
+use crate::types::CaptureStats;
 use screencapturekit::cm::CMSampleBuffer;
 use screencapturekit::stream::output_trait::SCStreamOutputTrait;
 use screencapturekit::stream::output_type::SCStreamOutputType;
@@ -26,6 +27,7 @@ struct AudioProducer {
 struct SharedHandlerState {
     system_producer: Mutex<AudioProducer>,
     mic_producer: Mutex<AudioProducer>,
+    stats: CaptureStats,
 }
 
 /// RT-safe ScreenCaptureKit output handler.
@@ -37,7 +39,9 @@ pub struct OutputHandler {
 
 /// Create a pair of output handlers (system audio + microphone) with their paired consumer rings.
 /// Returns two handlers so each can be registered for a separate `SCStreamOutputType`.
-pub fn create_output_handlers() -> (OutputHandler, OutputHandler, AudioRing, AudioRing) {
+pub fn create_output_handlers(
+    stats: CaptureStats,
+) -> (OutputHandler, OutputHandler, AudioRing, AudioRing) {
     let (sys_samples_prod, sys_samples_cons) = rtrb::RingBuffer::new(RING_CAPACITY);
     let (sys_pts_prod, sys_pts_cons) = rtrb::RingBuffer::new(PTS_RING_CAPACITY);
 
@@ -55,6 +59,7 @@ pub fn create_output_handlers() -> (OutputHandler, OutputHandler, AudioRing, Aud
             pts: mic_pts_prod,
             drop_count: Arc::new(AtomicU64::new(0)),
         }),
+        stats,
     });
 
     let system_handler = OutputHandler {
@@ -130,6 +135,7 @@ impl SCStreamOutputTrait for OutputHandler {
             let available = producer.samples.slots();
             if available < samples.len() {
                 producer.drop_count.fetch_add(1, Ordering::Relaxed);
+                self.state.stats.inc_frames_dropped();
                 return;
             }
 
@@ -152,6 +158,7 @@ impl SCStreamOutputTrait for OutputHandler {
                     }
                     Err(_) => {
                         producer.drop_count.fetch_add(1, Ordering::Relaxed);
+                        self.state.stats.inc_frames_dropped();
                         return;
                     }
                 }
