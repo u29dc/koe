@@ -250,4 +250,18 @@ mod tests {
         assert!(stats.chunks_emitted() > 0);
         assert_eq!(stats.chunks_dropped(), 0);
     }
+
+    #[test]
+    fn backpressure_increments_drop_counter() {
+        let mut pipeline = StreamPipeline::new(AudioSource::System).unwrap();
+        let stats = CaptureStats::new();
+        let (chunk_tx, _chunk_rx) = chunk_channel(1);
+
+        let input = vec![0.1f32; RESAMPLE_CHUNK * 700];
+        pipeline.process_with_speech(&input, 0, &chunk_tx, &stats, true);
+        assert_eq!(stats.chunks_dropped(), 0);
+
+        pipeline.process_with_speech(&input, 0, &chunk_tx, &stats, true);
+        assert!(stats.chunks_dropped() > 0);
+    }
 }
