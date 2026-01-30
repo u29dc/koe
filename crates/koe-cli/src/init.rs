@@ -58,78 +58,82 @@ pub fn run(args: &InitArgs, paths: &ConfigPaths) -> Result<(), InitError> {
     let mut changed = Vec::new();
     let mut kept = Vec::new();
 
-    let current_asr_active = if args.force {
+    let current_transcribe_active = if args.force {
         ""
     } else {
-        config.asr.active.as_str()
+        config.transcribe.active.as_str()
     };
-    let asr_active = prompt_provider("ASR mode", &["local", "cloud"], current_asr_active)?;
-    track_update(
-        &mut config.asr.active,
-        asr_active,
-        "asr.active",
-        &mut changed,
-        &mut kept,
-        args.force,
-    );
-
-    let configure_all_asr = args.force;
-    let active_asr = config.asr.active == "local";
-    if active_asr || configure_all_asr {
-        configure_asr_profile(
-            "asr.local",
-            &mut config.asr.local,
-            paths,
-            args,
-            &mut changed,
-            &mut kept,
-        )?;
-    }
-    if !active_asr || configure_all_asr {
-        configure_asr_profile(
-            "asr.cloud",
-            &mut config.asr.cloud,
-            paths,
-            args,
-            &mut changed,
-            &mut kept,
-        )?;
-    }
-
-    let current_summarizer_active = if args.force {
-        ""
-    } else {
-        config.summarizer.active.as_str()
-    };
-    let summarizer_active = prompt_provider(
-        "Summarizer mode",
+    let transcribe_active = prompt_provider(
+        "Transcribe mode",
         &["local", "cloud"],
-        current_summarizer_active,
+        current_transcribe_active,
     )?;
     track_update(
-        &mut config.summarizer.active,
-        summarizer_active,
-        "summarizer.active",
+        &mut config.transcribe.active,
+        transcribe_active,
+        "transcribe.active",
         &mut changed,
         &mut kept,
         args.force,
     );
 
-    let configure_all_summarizer = args.force;
-    let active_summarizer = config.summarizer.active == "local";
-    if active_summarizer || configure_all_summarizer {
-        configure_summarizer_profile(
-            "summarizer.local",
-            &mut config.summarizer.local,
+    let configure_all_transcribe = args.force;
+    let active_transcribe = config.transcribe.active == "local";
+    if active_transcribe || configure_all_transcribe {
+        configure_transcribe_profile(
+            "transcribe.local",
+            &mut config.transcribe.local,
+            paths,
             args,
             &mut changed,
             &mut kept,
         )?;
     }
-    if !active_summarizer || configure_all_summarizer {
-        configure_summarizer_profile(
-            "summarizer.cloud",
-            &mut config.summarizer.cloud,
+    if !active_transcribe || configure_all_transcribe {
+        configure_transcribe_profile(
+            "transcribe.cloud",
+            &mut config.transcribe.cloud,
+            paths,
+            args,
+            &mut changed,
+            &mut kept,
+        )?;
+    }
+
+    let current_summarize_active = if args.force {
+        ""
+    } else {
+        config.summarize.active.as_str()
+    };
+    let summarize_active = prompt_provider(
+        "Summarize mode",
+        &["local", "cloud"],
+        current_summarize_active,
+    )?;
+    track_update(
+        &mut config.summarize.active,
+        summarize_active,
+        "summarize.active",
+        &mut changed,
+        &mut kept,
+        args.force,
+    );
+
+    let configure_all_summarize = args.force;
+    let active_summarize = config.summarize.active == "local";
+    if active_summarize || configure_all_summarize {
+        configure_summarize_profile(
+            "summarize.local",
+            &mut config.summarize.local,
+            args,
+            &mut changed,
+            &mut kept,
+        )?;
+    }
+    if !active_summarize || configure_all_summarize {
+        configure_summarize_profile(
+            "summarize.cloud",
+            &mut config.summarize.cloud,
             args,
             &mut changed,
             &mut kept,
@@ -312,7 +316,7 @@ fn track_update(
     }
 }
 
-fn configure_asr_profile(
+fn configure_transcribe_profile(
     label: &str,
     profile: &mut ProviderConfig,
     paths: &ConfigPaths,
@@ -384,7 +388,7 @@ fn configure_asr_profile(
     Ok(())
 }
 
-fn configure_summarizer_profile(
+fn configure_summarize_profile(
     label: &str,
     profile: &mut ProviderConfig,
     args: &InitArgs,

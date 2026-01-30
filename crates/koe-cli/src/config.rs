@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-const CONFIG_VERSION: u32 = 2;
+const CONFIG_VERSION: u32 = 3;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -55,8 +55,8 @@ impl ConfigPaths {
 pub struct Config {
     pub version: u32,
     pub audio: AudioConfig,
-    pub asr: AsrConfig,
-    pub summarizer: SummarizerConfig,
+    pub transcribe: TranscribeConfig,
+    pub summarize: SummarizeConfig,
     pub session: SessionConfig,
     pub ui: UiConfig,
 }
@@ -66,8 +66,8 @@ impl Default for Config {
         Self {
             version: CONFIG_VERSION,
             audio: AudioConfig::default(),
-            asr: AsrConfig::default(),
-            summarizer: SummarizerConfig::default(),
+            transcribe: TranscribeConfig::default(),
+            summarize: SummarizeConfig::default(),
             session: SessionConfig::default(),
             ui: UiConfig::default(),
         }
@@ -96,13 +96,13 @@ impl Default for AudioConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct AsrConfig {
+pub struct TranscribeConfig {
     pub active: String,
     pub local: ProviderConfig,
     pub cloud: ProviderConfig,
 }
 
-impl Default for AsrConfig {
+impl Default for TranscribeConfig {
     fn default() -> Self {
         Self {
             active: "local".to_string(),
@@ -122,14 +122,14 @@ impl Default for AsrConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SummarizerConfig {
+pub struct SummarizeConfig {
     pub active: String,
     pub local: ProviderConfig,
     pub cloud: ProviderConfig,
     pub prompt_profile: String,
 }
 
-impl Default for SummarizerConfig {
+impl Default for SummarizeConfig {
     fn default() -> Self {
         Self {
             active: "local".to_string(),
@@ -208,7 +208,6 @@ impl Config {
         let mut migrated = false;
 
         if file_version < CONFIG_VERSION {
-            migrate_legacy_config(&raw, &mut config);
             config.version = CONFIG_VERSION;
             migrated = true;
         } else if file_version > CONFIG_VERSION {
@@ -235,27 +234,35 @@ impl Config {
 
     pub fn redacted(&self) -> Self {
         let mut redacted = self.clone();
-        redact_provider(&mut redacted.asr.local);
-        redact_provider(&mut redacted.asr.cloud);
-        redact_provider(&mut redacted.summarizer.local);
-        redact_provider(&mut redacted.summarizer.cloud);
+        redact_provider(&mut redacted.transcribe.local);
+        redact_provider(&mut redacted.transcribe.cloud);
+        redact_provider(&mut redacted.summarize.local);
+        redact_provider(&mut redacted.summarize.cloud);
         redacted
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
-        validate_active("asr.active", self.asr.active.as_str())?;
-        validate_active("summarizer.active", self.summarizer.active.as_str())?;
-        validate_asr_profile("asr.local", &self.asr.local, self.asr.active == "local")?;
-        validate_asr_profile("asr.cloud", &self.asr.cloud, self.asr.active == "cloud")?;
-        validate_summarizer_profile(
-            "summarizer.local",
-            &self.summarizer.local,
-            self.summarizer.active == "local",
+        validate_active("transcribe.active", self.transcribe.active.as_str())?;
+        validate_active("summarize.active", self.summarize.active.as_str())?;
+        validate_transcribe_profile(
+            "transcribe.local",
+            &self.transcribe.local,
+            self.transcribe.active == "local",
         )?;
-        validate_summarizer_profile(
-            "summarizer.cloud",
-            &self.summarizer.cloud,
-            self.summarizer.active == "cloud",
+        validate_transcribe_profile(
+            "transcribe.cloud",
+            &self.transcribe.cloud,
+            self.transcribe.active == "cloud",
+        )?;
+        validate_summarize_profile(
+            "summarize.local",
+            &self.summarize.local,
+            self.summarize.active == "local",
+        )?;
+        validate_summarize_profile(
+            "summarize.cloud",
+            &self.summarize.cloud,
+            self.summarize.active == "cloud",
         )?;
 
         if self.audio.sample_rate == 0 {
@@ -284,9 +291,9 @@ impl Config {
             }
         }
 
-        if self.summarizer.prompt_profile.trim().is_empty() {
+        if self.summarize.prompt_profile.trim().is_empty() {
             return Err(ConfigError::Validation(
-                "summarizer.prompt_profile must not be empty".into(),
+                "summarize.prompt_profile must not be empty".into(),
             ));
         }
         if self.ui.color_theme.trim().is_empty() {
@@ -361,7 +368,7 @@ fn validate_active(field: &str, value: &str) -> Result<(), ConfigError> {
     }
 }
 
-fn validate_asr_profile(
+fn validate_transcribe_profile(
     label: &str,
     profile: &ProviderConfig,
     is_active: bool,
@@ -397,7 +404,7 @@ fn validate_asr_profile(
     Ok(())
 }
 
-fn validate_summarizer_profile(
+fn validate_summarize_profile(
     label: &str,
     profile: &ProviderConfig,
     is_active: bool,
@@ -430,88 +437,6 @@ fn redact_provider(profile: &mut ProviderConfig) {
     }
 }
 
-fn migrate_legacy_config(raw: &toml::Value, config: &mut Config) {
-    let asr_table = raw.get("asr").and_then(|value| value.as_table());
-    let summarizer_table = raw.get("summarizer").and_then(|value| value.as_table());
-
-    if let Some(asr) = asr_table {
-        let provider = asr
-            .get("provider")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .to_string();
-        let model = asr
-            .get("model")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .to_string();
-        let api_key = asr
-            .get("api_key")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        if provider == "groq" {
-            config.asr.cloud.provider = provider;
-            if !model.is_empty() {
-                config.asr.cloud.model = model;
-            }
-            config.asr.cloud.api_key = api_key;
-            config.asr.active = "cloud".to_string();
-        } else if !provider.is_empty() {
-            config.asr.local.provider = provider;
-            if !model.is_empty() {
-                config.asr.local.model = model;
-            }
-            config.asr.local.api_key = api_key;
-            config.asr.active = "local".to_string();
-        }
-    }
-
-    if let Some(summarizer) = summarizer_table {
-        let provider = summarizer
-            .get("provider")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .to_string();
-        let model = summarizer
-            .get("model")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .to_string();
-        let api_key = summarizer
-            .get("api_key")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .to_string();
-        let prompt_profile = summarizer
-            .get("prompt_profile")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        if !prompt_profile.is_empty() {
-            config.summarizer.prompt_profile = prompt_profile;
-        }
-
-        if provider == "openrouter" {
-            config.summarizer.cloud.provider = provider;
-            if !model.is_empty() {
-                config.summarizer.cloud.model = model;
-            }
-            config.summarizer.cloud.api_key = api_key;
-            config.summarizer.active = "cloud".to_string();
-        } else if !provider.is_empty() {
-            config.summarizer.local.provider = provider;
-            if !model.is_empty() {
-                config.summarizer.local.model = model;
-            }
-            config.summarizer.local.api_key = api_key;
-            config.summarizer.active = "local".to_string();
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{CONFIG_VERSION, Config, ConfigPaths};
@@ -528,8 +453,8 @@ mod tests {
         assert!(paths.models_dir.is_dir());
         assert!(paths.sessions_dir.is_dir());
         assert_eq!(config.version, CONFIG_VERSION);
-        assert_eq!(config.asr.local.provider, "whisper");
-        assert_eq!(config.summarizer.local.provider, "ollama");
+        assert_eq!(config.transcribe.local.provider, "whisper");
+        assert_eq!(config.summarize.local.provider, "ollama");
 
         #[cfg(unix)]
         {
@@ -544,14 +469,17 @@ mod tests {
     }
 
     #[test]
-    fn load_migrates_missing_fields() {
+    fn load_updates_version_and_defaults() {
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().join("koe");
         let paths = ConfigPaths::from_base(base);
         fs::create_dir_all(&paths.base_dir).unwrap();
-        let content = r#"version = 1
+        let content = r#"version = 2
 
-[asr]
+[transcribe]
+active = "local"
+
+[transcribe.local]
 provider = "whisper"
 model = "base.en"
 api_key = ""
@@ -561,27 +489,27 @@ api_key = ""
         let config = Config::load(&paths).unwrap();
         assert_eq!(config.version, CONFIG_VERSION);
         assert_eq!(config.ui.color_theme, "minimal");
-        assert_eq!(config.asr.local.provider, "whisper");
+        assert_eq!(config.transcribe.local.provider, "whisper");
 
         let updated = fs::read_to_string(&paths.config_path).unwrap();
-        assert!(updated.contains("version = 2"));
-        assert!(updated.contains("[summarizer.local]"));
+        assert!(updated.contains("version = 3"));
+        assert!(updated.contains("[summarize.local]"));
     }
 
     #[test]
     fn redacted_hides_api_keys() {
         let mut config = Config::default();
-        config.asr.local.api_key = "secret".to_string();
-        config.summarizer.cloud.api_key = "secret2".to_string();
+        config.transcribe.local.api_key = "secret".to_string();
+        config.summarize.cloud.api_key = "secret2".to_string();
         let redacted = config.redacted();
-        assert_eq!(redacted.asr.local.api_key, "<redacted>");
-        assert_eq!(redacted.summarizer.cloud.api_key, "<redacted>");
+        assert_eq!(redacted.transcribe.local.api_key, "<redacted>");
+        assert_eq!(redacted.summarize.cloud.api_key, "<redacted>");
     }
 
     #[test]
     fn validate_rejects_bad_provider() {
         let mut config = Config::default();
-        config.asr.local.provider = "bad".to_string();
+        config.transcribe.local.provider = "bad".to_string();
         assert!(config.validate().is_err());
     }
 }

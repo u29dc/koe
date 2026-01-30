@@ -1,6 +1,6 @@
 # KOE
 
-Real-time meeting transcription and notes engine for macOS, built in Rust with ScreenCaptureKit audio capture, VAD-gated chunking, local/cloud ASR (whisper-rs/Groq), and LLM-powered patch-based summarization (Ollama/OpenRouter), rendered in a ratatui TUI.
+Real-time meeting transcription and notes engine for macOS, built in Rust with ScreenCaptureKit audio capture, VAD-gated chunking, local/cloud transcribe providers (whisper-rs/Groq), and LLM-powered patch-based summary engine (Ollama/OpenRouter), rendered in a ratatui TUI.
 
 ## 1. Repository Structure
 
@@ -14,7 +14,7 @@ koe/
   rustfmt.toml            # Rust formatting rules
   .husky/                 # pre-commit (lint-staged), commit-msg (commitlint)
   crates/
-    koe-core/             # engine: capture, processing, ASR, transcript, notes
+    koe-core/             # engine: capture, processing, transcribe, transcript, notes
     koe-cli/              # thin TUI shell: renders core events, forwards commands
 ```
 
@@ -27,10 +27,10 @@ koe/
 | Ring buffer      | rtrb 0.3.2                                     | lock-free SPSC for RT callbacks      |
 | Resampling       | rubato 0.16.2                                  | 48k -> 16k high-quality              |
 | VAD              | voice_activity_detector 0.2.1                  | Silero ONNX, 512 samples/32ms frames |
-| Local ASR        | whisper-rs 0.15.1                              | Metal acceleration                   |
-| Cloud ASR        | Groq API                                       | Whisper large-v3-turbo via ureq      |
-| Local summarizer | Ollama                                         | NDJSON streaming via ureq            |
-| Cloud summarizer | OpenRouter API                                 | via ureq                             |
+| Local transcribe | whisper-rs 0.15.1                              | Metal acceleration                   |
+| Cloud transcribe | Groq API                                       | Whisper large-v3-turbo via ureq      |
+| Local summarize | Ollama                                         | NDJSON streaming via ureq            |
+| Cloud summarize | OpenRouter API                                 | via ureq                             |
 | TUI              | ratatui 0.30.0 + crossterm 0.29.0              |                                      |
 | CLI              | clap 4.5.56                                    | derive features                      |
 | HTTP             | ureq 3.1.4                                     | json + multipart features            |
@@ -51,17 +51,17 @@ ScreenCaptureKit (system audio + mic)
   -> RT callback (copy f32 into SPSC ring buffers, no alloc/locks)
     -> Audio processor (align, mix/keep separate, resample 48k -> 16k)
       -> VAD + chunker (speech-gated, overlap) -> sync_channel<AudioChunk>
-        -> ASR worker (local whisper-rs or Groq) -> TranscriptSegment[]
+        -> transcribe worker (local whisper-rs or Groq) -> TranscriptSegment[]
           -> Transcript ledger (mutable window + finalize) -> Event bus
             -> Notes engine (patch-only, Ollama/OpenRouter) -> NotesPatch
               -> TUI (transcript + notes + status)
 ```
 
-Component responsibilities: ScreenCaptureKit adapter (enumerate content, configure stream, deliver audio buffers), RT callback (copy samples into ring buffer and return immediately), audio processor (timestamp alignment, optional mix, resample to 16 kHz mono), VAD + chunker (detect speech, emit bounded overlapped chunks), ASR provider (transcribe chunks into timestamped segments), transcript ledger (merge overlaps, keep last N seconds mutable, finalize older segments), notes engine (produce patch ops, apply to stable meeting state), TUI (render transcript/notes, show lag/drops/provider status, handle hotkeys).
+Component responsibilities: ScreenCaptureKit adapter (enumerate content, configure stream, deliver audio buffers), RT callback (copy samples into ring buffer and return immediately), audio processor (timestamp alignment, optional mix, resample to 16 kHz mono), VAD + chunker (detect speech, emit bounded overlapped chunks), transcribe provider (transcribe chunks into timestamped segments), transcript ledger (merge overlaps, keep last N seconds mutable, finalize older segments), notes engine (produce patch ops, apply to stable meeting state), TUI (render transcript/notes, show lag/drops/provider status, handle hotkeys).
 
-Threading model: ScreenCaptureKit dispatch queue -> SPSC ring buffer (`rtrb::RingBuffer<f32>`) per stream; audio processor thread drains ring buffers and emits chunks; chunk queue via `std::sync::mpsc::sync_channel<AudioChunk>` (cap 4, drop-oldest); ASR worker thread reads chunks and outputs segments on `std::sync::mpsc::channel<TranscriptEvent>`; notes thread ticks on interval/trigger and outputs `NotesPatch` on `std::sync::mpsc::channel<NotesPatch>`; UI thread (ratatui) consumes events from a single merged channel.
+Threading model: ScreenCaptureKit dispatch queue -> SPSC ring buffer (`rtrb::RingBuffer<f32>`) per stream; audio processor thread drains ring buffers and emits chunks; chunk queue via `std::sync::mpsc::sync_channel<AudioChunk>` (cap 4, drop-oldest); transcribe worker thread reads chunks and outputs segments on `std::sync::mpsc::channel<TranscriptEvent>`; notes thread ticks on interval/trigger and outputs `NotesPatch` on `std::sync::mpsc::channel<NotesPatch>`; UI thread (ratatui) consumes events from a single merged channel.
 
-Event/command surface: `CoreEvent` (transcript updates, finalized segment IDs, notes patches, provider status, stats, errors), `CoreCommand` (start/stop, provider switch, force summarize, export, pause/resume); transport is in-process channels for koe-cli, NDJSON over stdout or Unix socket for future Swift UI.
+Event/command surface: `CoreEvent` (transcript updates, finalized segment IDs, notes patches, provider status, stats, errors), `CoreCommand` (start/stop, mode switch, force summarize, export, pause/resume); transport is in-process channels for koe-cli, NDJSON over stdout or Unix socket for future Swift UI.
 
 ## 4. Technical Decisions
 
@@ -73,7 +73,7 @@ Chunking/VAD: Silero VAD frame size 512 samples at 16 kHz (32 ms), threshold 0.5
 
 Backpressure: ring buffer 10 s per stream, chunk queue cap 4 drop-oldest, notes queue cap 1 skip-if-busy; favors freshness and UI responsiveness.
 
-Notes stability: patch-based updates with stable IDs (add/update ops only), summarizer uses finalized segments only, tentative notes marked when referencing mutable evidence, update cadence every 10 s or on keyword triggers (decision/action phrases).
+Notes stability: patch-based updates with stable IDs (add/update ops only), summarize uses finalized segments only, tentative notes marked when referencing mutable evidence, update cadence every 10 s or on keyword triggers (decision/action phrases).
 
 Speaker labeling: stream-based attribution (mic -> "Me", system -> "Them"), mixed stream labeled "Unknown"; most reliable low-latency option without diarization overhead.
 
@@ -122,7 +122,7 @@ pub enum NotesOp {
 }
 
 pub struct NotesPatch { pub ops: Vec<NotesOp> }
-pub enum SummarizerEvent { DraftToken(String), PatchReady(NotesPatch) }
+pub enum SummarizeEvent { DraftToken(String), PatchReady(NotesPatch) }
 
 pub trait AudioCapture: Send {
     fn start(&mut self) -> Result<(), CaptureError>;
@@ -131,14 +131,14 @@ pub trait AudioCapture: Send {
     fn try_recv_mic(&mut self) -> Option<AudioFrame>;
 }
 
-pub trait AsrProvider: Send {
+pub trait TranscribeProvider: Send {
     fn name(&self) -> &'static str;
-    fn transcribe(&mut self, chunk: &AudioChunk) -> Result<Vec<TranscriptSegment>, AsrError>;
+    fn transcribe(&mut self, chunk: &AudioChunk) -> Result<Vec<TranscriptSegment>, TranscribeError>;
 }
 
-pub trait SummarizerProvider: Send {
+pub trait SummarizeProvider: Send {
     fn name(&self) -> &'static str;
-    fn summarize(&mut self, recent_segments: &[TranscriptSegment], state: &MeetingState, on_event: &mut dyn FnMut(SummarizerEvent)) -> Result<(), SummarizerError>;
+    fn summarize(&mut self, recent_segments: &[TranscriptSegment], state: &MeetingState, on_event: &mut dyn FnMut(SummarizeEvent)) -> Result<(), SummarizeError>;
 }
 ```
 
@@ -155,17 +155,17 @@ pub trait SummarizerProvider: Send {
 
 ## 7. Local Setup and Testing
 
-- Run `bun run koe -- init` to download a Whisper model and write `~/.koe/config.toml` (interactive onboarding for ASR/summarizer provider, model, and API keys).
+- Run `bun run koe -- init` to download a Whisper model and write `~/.koe/config.toml` (interactive onboarding for transcribe/summarize provider, model, and API keys).
 - Alternate model: `bun run koe -- init --model small`.
-- Run local ASR: `bun run koe -- --asr whisper`.
-- Run cloud ASR: `bun run koe -- --asr groq`.
-- Environment variables (`GROQ_API_KEY`, `OPENROUTER_API_KEY`) are optional overrides; `~/.koe/config.toml` is canonical.
+- Run local transcribe: `bun run koe -- --transcribe local`.
+- Run cloud transcribe: `bun run koe -- --transcribe cloud`.
+- Environment variables (`KOE_TRANSCRIBE_CLOUD_API_KEY`, `KOE_SUMMARIZE_CLOUD_API_KEY`) are optional overrides; `~/.koe/config.toml` is canonical.
 
 ## 8. Quality
 
 Zero clippy warnings (`-D warnings`), `cargo fmt --all` enforced, all tests passing, pre-commit hooks run full `util:check` via lint-staged, commitlint enforces conventional commits with domain scopes (core, cli, web, config, deps).
 
-Testing strategy: unit tests for VAD state machine and chunk boundary logic, transcript ledger overlap merge and finalize logic, NotesPatch apply and stable ID handling; integration tests feed canned WAV chunks through chunker -> ASR mock -> ledger and summarizer mock returns patch with state application; manual QA for permissions prompts, restart behavior, capture correctness, and 30-min long-running session stability.
+Testing strategy: unit tests for VAD state machine and chunk boundary logic, transcript ledger overlap merge and finalize logic, NotesPatch apply and stable ID handling; integration tests feed canned WAV chunks through chunker -> transcribe mock -> ledger and summarize mock returns patch with state application; manual QA for permissions prompts, restart behavior, capture correctness, and 30-min long-running session stability.
 
 ## 9. Roadmap
 
@@ -184,20 +184,20 @@ Phase 0: Quality gate wiring
         - Maintain formatting rules here rather than inline editor settings so that `cargo fmt` is deterministic. If style changes are needed, document them in the plan or a style note. Ensure formatting does not fight the default Rust edition settings.
     - [x] rustfmt and clippy are installed (`rustup component add rustfmt clippy`) (verified via `cargo fmt --version` and `cargo clippy --version`).
         - These are required for `util:format` and `util:lint` to run in a clean environment. Verify by running `rustup component list --installed` or by executing the scripts. If this project is used in CI, make sure the CI image installs these components too.
-    - [x] Config file lives at `~/.koe/config.toml` with a minimal schema (audio, asr, summarizer, ui) and defaults for local-first.
-        - Required sections: `[audio]` (sample_rate, channels, sources), `[asr]` (provider, model, api_key), `[summarizer]` (provider, model, api_key, prompt_profile), `[ui]` (show_transcript, notes_only_default, color_theme).
+    - [x] Config file lives at `~/.koe/config.toml` with a minimal schema (audio, transcribe, summarize, ui) and defaults for local-first.
+        - Required sections: `[audio]` (sample_rate, channels, sources), `[transcribe]` (active), `[transcribe.local]` + `[transcribe.cloud]` (provider, model, api_key), `[summarize]` (active, prompt_profile), `[summarize.local]` + `[summarize.cloud]` (provider, model, api_key), `[ui]` (show_transcript, notes_only_default, color_theme).
         - Keep all user-facing settings here, including API keys, model choices, and UI toggles. Environment variables may override for CI/dev but are optional for end users.
         - Ensure `~/.koe/` contains `config.toml`, `models/`, and `sessions/` directories with predictable paths.
         - Ensure config file permissions are restricted (0600); warn if file is group/world readable.
         - Add a config version field and lightweight migration path for new fields.
         - Define a single runtime entry point: `koe` runs the TUI; `koe init` and `koe config` handle setup. Avoid introducing additional top-level commands unless required.
     - [x] `koe config` subcommand reads/writes config with validation and redacts secrets in terminal output.
-        - Support `--print` (redact keys), `--set key=value` (dotted paths like `asr.provider=whisper`), and `--edit` (opens in $EDITOR) for quick changes.
+        - Support `--print` (redact keys), `--set key=value` (dotted paths like `transcribe.active=cloud` or `transcribe.local.provider=whisper`), and `--edit` (opens in $EDITOR) for quick changes.
         - Validate enums (provider names), file paths, and required keys; surface errors with actionable guidance.
         - Define precedence: CLI flags > config file > env vars (env vars optional), and keep precedence consistent across commands.
     - [x] `koe init` runs interactive onboarding (local or cloud, model selection, API keys) and persists to config.
-        - Prompt order: permissions guidance, ASR choice (local/cloud), model selection or download, summarizer choice (local/cloud), model selection, API key entry; write config and report the next command to run.
-        - When local ASR is selected, offer model download options and show disk size; when cloud is selected, prompt for API key and validate non-empty input.
+        - Prompt order: permissions guidance, transcribe choice (local/cloud), model selection or download, summarize choice (local/cloud), model selection, API key entry; write config and report the next command to run.
+        - When local transcribe is selected, offer model download options and show disk size; when cloud is selected, prompt for API key and validate non-empty input.
     - [x] `koe init` prints macOS permission instructions for Screen Recording + Microphone and notes restart requirements.
         - Keep output minimal and actionable, include the exact System Settings path, mention that permissions may require a restart, and show a single-line checklist of required grants.
 - Smoke tests:
@@ -216,7 +216,7 @@ Phase 1: Audio capture + chunking
     - [x] Default microphone selection prefers built-in mic when config is unset.
         - If `audio.microphone_device_id` is empty and microphone capture is enabled, choose the built-in mic (id `BuiltInMicrophoneDevice` or name containing "built-in"/"macbook") and fall back to the OS default input when no built-in is present. Avoid Bluetooth headset mic becoming the implicit default unless explicitly configured.
     - [x] Audio processor emits VAD-gated chunks with overlap (`crates/koe-core/src/process/mod.rs`, `crates/koe-core/src/process/chunker.rs`).
-        - The processor should read from the capture rings, resample to 16 kHz, run VAD, and feed the chunker with the correct sample rate. Confirm the overlap behavior by inspecting chunk sizes around the target and max sizes. Maintain the 2s/4s/6s/1s policy to keep downstream ASR costs predictable.
+        - The processor should read from the capture rings, resample to 16 kHz, run VAD, and feed the chunker with the correct sample rate. Confirm the overlap behavior by inspecting chunk sizes around the target and max sizes. Maintain the 2s/4s/6s/1s policy to keep downstream transcribe costs predictable.
     - [x] Drop metrics visible in status (frame drops not wired; handler drop count not surfaced).
         - Wire the handler drop counter into `CaptureStats` so the UI can display actual frame drops. This requires either passing `CaptureStats` into the handler or pulling drop counters periodically. The status bar should show both frames dropped and chunks dropped to separate capture overload from queue backpressure.
     - [x] Drop policy is drop-oldest (currently drop-newest on full).
@@ -233,50 +233,50 @@ Phase 1: Audio capture + chunking
     - [x] Artificially pause consumer to confirm drops increment.
         - Sleep the processor loop or temporarily stop chunk consumption to force queue backpressure. Confirm chunk drops increment in stats and that the UI reflects the drop count. This test verifies both the queue policy and the visibility of drops.
 
-Phase 2: ASR + transcript ledger + TUI
+Phase 2: transcribe + transcript ledger + TUI
 
 - Done criteria:
-    - [x] whisper-rs provider implemented (`crates/koe-core/src/asr/whisper.rs`).
+    - [x] whisper-rs provider implemented (`crates/koe-core/src/transcribe/whisper.rs`).
         - Verify model loading path and error handling for missing or invalid models. Ensure the sample rate matches 16 kHz and the language is set intentionally. If you change sampling strategy or thread count, update performance expectations in this plan.
-    - [x] Groq provider implemented (`crates/koe-core/src/asr/groq.rs`).
-        - Add explicit request timeouts and retry policy so a stalled request does not block the ASR worker forever. Ensure the Groq API key is read from the environment and errors are surfaced clearly to the UI. Keep the WAV encoding format stable; Groq expects WAV audio with a valid header.
+    - [x] Groq provider implemented (`crates/koe-core/src/transcribe/groq.rs`).
+        - Add explicit request timeouts and retry policy so a stalled request does not block the transcribe worker forever. Ensure the Groq API key is read from config or environment overrides and errors are surfaced clearly to the UI. Keep the WAV encoding format stable; Groq expects WAV audio with a valid header.
     - [x] Transcript ledger implemented (`crates/koe-core/src/transcript.rs`).
         - Keep the overlap window in sync with chunker overlap. If you adjust chunk overlap, adjust `OVERLAP_WINDOW_MS` to match. Maintain tests for dedupe behavior because this directly affects transcript quality.
-    - [x] ASR worker consumes chunks and emits transcript events to UI.
+    - [x] transcribe worker consumes chunks and emits transcript events to UI.
         - Add a worker thread or task that reads from `chunk_rx`, calls the selected provider, and emits a `TranscriptEvent` (or equivalent) on a channel to the UI. Keep this loop resilient: skip empty segments, keep running on transient failures, and surface errors as events. This is the main wiring step that makes the app functional.
-    - [x] CLI flags wire into ASR provider creation (`crates/koe-cli/src/main.rs`).
-        - Use `--asr` and `--model-trn` to call `create_asr` and pass the provider into the runtime. If the provider fails to initialize, exit with a clear error that points to missing model or API key. Ensure defaults align with the plan.
+    - [x] CLI flags wire into transcribe provider creation (`crates/koe-cli/src/main.rs`).
+        - Use `--transcribe` and `--transcribe-model` to call `create_transcribe_provider` and pass the provider into the runtime. If the provider fails to initialize, exit with a clear error that points to missing model or API key. Ensure defaults align with the plan.
     - [x] Transcript renders in TUI (currently placeholder text).
         - Keep a local transcript buffer in the TUI state and update it when new events arrive. Render a limited window to keep UI responsive and avoid huge redraws. Make sure text wrapping is stable and that the UI does not flicker on updates.
     - [x] Speaker labeling (mic = "Me", system = "Them").
         - Map `AudioChunk.source` to `TranscriptSegment.speaker` at the time of segment creation. If a mixed stream is used, set speaker to `None` or `Unknown`. This is also the hook to later integrate diarization if needed.
-    - [x] Provider switching without restart (command surface missing).
-        - Define a command channel from UI to core and support hotkeys to switch providers. Recreate the provider in the ASR worker and emit a status event to update the UI. Ensure in-flight chunks are handled safely during switches.
-    - [x] Status bar shows ASR lag and active provider.
-        - Track time spent per chunk in the ASR worker and emit rolling latency metrics. Display the active provider and last latency in the status bar alongside capture stats. This is essential for troubleshooting local vs cloud performance.
+    - [x] Mode switching without restart (command surface missing).
+        - Define a command channel from UI to core and support hotkeys to switch modes. Recreate the provider in the transcribe worker and emit a status event to update the UI. Ensure in-flight chunks are handled safely during switches.
+    - [x] Status bar shows transcribe lag and active mode.
+        - Track time spent per chunk in the transcribe worker and emit rolling latency metrics. Display the active mode and last latency in the status bar alongside capture stats. This is essential for troubleshooting local vs cloud performance.
     - [x] Mutable window corrections only affect last 15 s (not implemented).
-        - Implement a mutable transcript window and finalize segments that are older than the window. When new ASR results overlap finalized segments, do not alter them. Keep this window consistent with the chunk overlap to prevent duplicate text.
+        - Implement a mutable transcript window and finalize segments that are older than the window. When new transcribe results overlap finalized segments, do not alter them. Keep this window consistent with the chunk overlap to prevent duplicate text.
     - [x] Minimal full-screen TUI with a focused notes pane and optional transcript pane.
         - Default view is notes-only; toggle transcript visibility with a single key (e.g., `t`). When visible, show transcript on one side and notes on the other with stable layout and no flicker.
         - Provide a clear status line with provider/lag/capture stats, and keep layout stable when toggling panes (no shifting widths).
-        - Document key bindings in a single place (help overlay or footer) and keep them consistent: quit, toggle transcript, switch provider, set context.
+        - Document key bindings in a single place (help overlay or footer) and keep them consistent: quit, toggle transcript, switch mode, set context.
     - [x] Color system: other-party content uses a restrained blue, self content uses neutral gray, headings are subtle and consistent.
         - Apply colors consistently in both transcript and notes; blue is reserved for “Them” content, gray for “Me,” and neutral for headings/metadata.
         - Keep palette minimal and readable; avoid bright or noisy styling. Ensure colors remain legible in common terminal themes.
     - [x] TUI clean shutdown restores terminal even on panic.
         - Maintain existing panic hook and ensure all threads stop cleanly on exit.
-    - [x] Meeting context can be provided via CLI, config, or TUI and is passed to the summarizer.
+    - [x] Meeting context can be provided via CLI, config, or TUI and is passed to the summarize.
         - Support `--context`, config default (`session.context`), and an in-TUI edit action; pick a single canonical source with clear precedence (CLI > TUI > config).
-        - Context should be stored in session metadata (`metadata.toml`) and injected into summarizer prompts; allow empty/absent context.
+        - Context should be stored in session metadata (`metadata.toml`) and injected into summarize prompts; allow empty/absent context.
         - Support multi-line context; preserve verbatim and redact from logs unless explicitly printed.
         - TUI context edits update the current session metadata only (do not mutate global config).
 - Smoke tests:
     - [x] Short utterance appears within 4 s locally, faster on cloud.
-        - Use a stopwatch and a single spoken phrase. Confirm the local model is within target latency and cloud is faster. If latency is too high, reduce chunk size or increase ASR thread resources.
+        - Use a stopwatch and a single spoken phrase. Confirm the local model is within target latency and cloud is faster. If latency is too high, reduce chunk size or increase transcribe thread resources.
     - [x] Overlap does not duplicate text.
         - Speak continuous speech over multiple chunks and verify deduplication in the transcript ledger. If duplicates appear, adjust similarity threshold or merge policy. Document any changes to the similarity heuristic.
-    - [x] Switch providers without crash.
-        - Switch providers repeatedly during active audio capture. Ensure the worker restarts cleanly and the UI status updates. This test should not leak threads or leave the provider in a half-initialized state.
+    - [x] Switch modes without crash.
+        - Switch modes repeatedly during active audio capture. Ensure the worker restarts cleanly and the UI status updates. This test should not leak threads or leave the provider in a half-initialized state.
     - [ ] Toggle transcript pane repeatedly without layout glitches.
         - Verify the notes pane remains stable and the transcript pane cleanly hides/shows without resizing artifacts.
         - BLOCKED: Manual UI toggle verification cannot be completed in this non-interactive environment; tried only code-level implementation; next steps: run `bun run koe`, press `t` repeatedly during active UI, confirm layout stability; file refs: `crates/koe-cli/src/tui.rs`.
@@ -285,15 +285,15 @@ Phase 3: Notes engine (patch-only)
 
 - Done criteria:
     - [x] Ollama provider emits NotesPatch.
-        - Implement a summarizer provider that calls Ollama and parses a patch-only response. Keep the prompt and response schema stable to avoid parse failures. Treat network errors as non-fatal and try again on the next cycle.
+        - Implement a summarize provider that calls Ollama and parses a patch-only response. Keep the prompt and response schema stable to avoid parse failures. Treat network errors as non-fatal and try again on the next cycle.
     - [x] OpenRouter provider emits NotesPatch.
-        - Add a second provider with similar patch parsing, but with OpenRouter-specific authentication. Validate response shape and ensure timeouts and retries are consistent with Groq. The provider should be swappable at runtime like ASR.
+        - Add a second provider with similar patch parsing, but with OpenRouter-specific authentication. Validate response shape and ensure timeouts and retries are consistent with Groq. The provider should be swappable at runtime like transcribe.
     - [x] Notes pane updates without full rewrites.
         - Apply patches to a persistent `MeetingState` and only update changed items in the TUI; avoid full redraws to keep scrolling stable. Patches should only add/update, never delete silently.
     - [x] Stable IDs persist across updates.
-        - IDs should be generated by the summarizer and reused across updates, not regenerated on each patch. This allows UI selection and references to remain stable. Validate by running multiple summaries and confirming IDs remain unchanged for the same item.
+        - IDs should be generated by the summarize and reused across updates, not regenerated on each patch. This allows UI selection and references to remain stable. Validate by running multiple summaries and confirming IDs remain unchanged for the same item.
     - [x] Summarizer uses finalized segments only.
-        - Feed only `finalized` transcript segments into the summarizer to avoid churn. If you want provisional notes, mark them clearly and separate them from stable notes. This protects against edits to earlier transcript text.
+        - Feed only `finalized` transcript segments into the summarize to avoid churn. If you want provisional notes, mark them clearly and separate them from stable notes. This protects against edits to earlier transcript text.
     - [x] Summarizer prompts are tuned for minimal, information-dense output with short patches.
         - Output must be concise, avoid filler, and emit only key points/actions/decisions. Prefer short noun phrases over full sentences.
     - [x] Notes capture speaker attribution when available (Me vs Them) with consistent labels.
@@ -306,32 +306,32 @@ Phase 3: Notes engine (patch-only)
         - Inject context ahead of transcript; if context is empty, omit the section entirely to avoid noise.
 - Smoke tests:
     - [ ] Decision phrasing triggers new decision item.
-        - Use test phrases that match the summarizer prompt and confirm a new decision appears. Check that it references the correct transcript evidence IDs. Verify that repeated phrases do not create duplicates.
-        - BLOCKED: Requires live summarizer execution to validate LLM-driven decision extraction; cannot run external model or interactive session here; tried only prompt/unit-level changes; next steps: run `koe` with Ollama/OpenRouter enabled, speak a decision phrase (e.g., "We decided to ship on Friday"), confirm a decision NotesPatch is produced with evidence IDs; file refs: `crates/koe-core/src/summarizer/patch.rs`, `crates/koe-cli/src/tui.rs`.
+        - Use test phrases that match the summarize prompt and confirm a new decision appears. Check that it references the correct transcript evidence IDs. Verify that repeated phrases do not create duplicates.
+        - BLOCKED: Requires live summarize execution to validate LLM-driven decision extraction; cannot run external model or interactive session here; tried only prompt/unit-level changes; next steps: run `koe` with Ollama/OpenRouter enabled, speak a decision phrase (e.g., "We decided to ship on Friday"), confirm a decision NotesPatch is produced with evidence IDs; file refs: `crates/koe-core/src/summarize/patch.rs`, `crates/koe-cli/src/tui.rs`.
     - [ ] Action phrasing triggers new action item.
         - Use phrases with clear owner and due date language. Validate parsing of optional fields like owner and due date. Ensure the item shows up in the correct notes section.
-        - BLOCKED: Requires live summarizer execution to validate LLM-driven action extraction; cannot run external model or interactive session here; tried only prompt/unit-level changes; next steps: run `koe` with Ollama/OpenRouter enabled, speak an action phrase with owner/due (e.g., "Han will send the draft by Tuesday"), confirm action item appears with owner/due; file refs: `crates/koe-core/src/summarizer/patch.rs`, `crates/koe-cli/src/tui.rs`.
+        - BLOCKED: Requires live summarize execution to validate LLM-driven action extraction; cannot run external model or interactive session here; tried only prompt/unit-level changes; next steps: run `koe` with Ollama/OpenRouter enabled, speak an action phrase with owner/due (e.g., "Han will send the draft by Tuesday"), confirm action item appears with owner/due; file refs: `crates/koe-core/src/summarize/patch.rs`, `crates/koe-cli/src/tui.rs`.
     - [ ] No duplicates after multiple cycles.
-        - Run the summarizer multiple times without new transcript segments. The notes list should remain stable with no new items. If duplicates appear, adjust prompt or patch logic to enforce idempotency.
-        - BLOCKED: Requires live summarizer execution over multiple cycles; cannot run external model or interactive session here; tried only prompt/unit-level changes; next steps: run `koe`, let summarizer run multiple intervals without new speech, confirm no duplicate notes; adjust prompt/idempotency logic if duplicates appear; file refs: `crates/koe-core/src/summarizer/patch.rs`, `crates/koe-cli/src/tui.rs`.
+        - Run the summarize multiple times without new transcript segments. The notes list should remain stable with no new items. If duplicates appear, adjust prompt or patch logic to enforce idempotency.
+        - BLOCKED: Requires live summarize execution over multiple cycles; cannot run external model or interactive session here; tried only prompt/unit-level changes; next steps: run `koe`, let summarize run multiple intervals without new speech, confirm no duplicate notes; adjust prompt/idempotency logic if duplicates appear; file refs: `crates/koe-core/src/summarize/patch.rs`, `crates/koe-cli/src/tui.rs`.
 
 Phase 4: Latency comparison + polish
 
 - Done criteria:
-    - [x] Status bar shows ASR lag, drops, and provider.
-        - Extend the status bar to include ASR latency, active provider, and capture drop metrics. Keep the layout fixed width to avoid jitter as values change. This should be updated from the same event stream as transcript updates.
+    - [x] Status bar shows transcribe lag, drops, and provider.
+        - Extend the status bar to include transcribe latency, active provider, and capture drop metrics. Keep the layout fixed width to avoid jitter as values change. This should be updated from the same event stream as transcript updates.
     - [x] Sessions are persisted under `~/.koe/sessions/{uuidv7}/` with rolling checkpoints.
-        - Create a new session directory at start with `metadata.toml` (or JSON) containing: id, start_time, end_time (nullable), finalized flag, asr/summarizer providers, model names, file names.
+        - Create a new session directory at start with `metadata.toml` (or JSON) containing: id, start_time, end_time (nullable), finalized flag, transcribe/summarize providers, model names, file names.
         - Keep schema extensible for future fields: title, description, participants, tags; do not require them yet.
         - Use UUIDv7 for session id and include it in filenames and metadata for easy correlation.
         - Canonical formats: `metadata.toml` (single-record), `transcript.jsonl` (append-only segments), `notes.json` (state snapshot), `context.txt` (verbatim optional), `audio.raw` (crash-safe stream).
         - Derived exports: `audio.wav`, `transcript.md`, `notes.md` written on finalize or explicit export; do not treat markdown as canonical.
-        - Metadata schema (TOML): id (uuidv7), start_time (RFC3339), end_time (RFC3339 or null), finalized (bool), context_file, audio_raw_file, audio_wav_file, transcript_file, notes_file, asr_provider, asr_model, summarizer_provider, summarizer_model.
+        - Metadata schema (TOML): id (uuidv7), start_time (RFC3339), end_time (RFC3339 or null), finalized (bool), context_file, audio_raw_file, audio_wav_file, transcript_file, notes_file, transcribe_provider, transcribe_model, summarize_provider, summarize_model.
         - Transcript JSONL schema: `{id, start_ms, end_ms, speaker, text, finalized, source}`; append per segment, keep one JSON object per line.
         - Notes JSON schema: full `MeetingState` snapshot with key_points/actions/decisions; include `updated_at` timestamp for snapshots.
         - Audio raw format: PCM f32 little-endian, 48 kHz, mono, interleaved; record exact format in metadata for WAV finalization.
     - [x] Audio, transcript, and notes are continuously written during the session.
-        - Persist audio from local capture even when cloud ASR is used. Write `audio.raw` continuously with periodic flush, and finalize to `audio.wav` on clean shutdown; maintain a transcript append file (e.g., `transcript.jsonl`) and a notes snapshot (`notes.json`).
+        - Persist audio from local capture even when cloud transcribe is used. Write `audio.raw` continuously with periodic flush, and finalize to `audio.wav` on clean shutdown; maintain a transcript append file (e.g., `transcript.jsonl`) and a notes snapshot (`notes.json`).
         - Use atomic write patterns for metadata and notes snapshots (write temp + rename) to survive crashes.
         - Define checkpoint interval (e.g., every 5–10 s) and ensure partial data is still readable on crash.
         - Rationale: JSONL for append-only streams (transcript, optional patch log), JSON/TOML for single-record snapshots (metadata/notes), Markdown only for human export.
@@ -342,7 +342,7 @@ Phase 4: Latency comparison + polish
 - Smoke tests:
     - [ ] Compare local vs cloud latency over a 3-minute session.
         - Run a controlled session with both providers and record average latency. Use the status bar metrics to compare and document the result. If results vary, capture network conditions for context.
-        - BLOCKED: Requires a live audio session with local and cloud ASR plus manual timing; cannot run interactive 3-minute capture here; tried only code-level checks; next steps: run `bun run koe`, switch providers, speak continuously for 3 minutes each, record status bar lag metrics; file refs: `crates/koe-cli/src/tui.rs`, `crates/koe-cli/src/main.rs`.
+        - BLOCKED: Requires a live audio session with local and cloud transcribe plus manual timing; cannot run interactive 3-minute capture here; tried only code-level checks; next steps: run `bun run koe`, switch providers, speak continuously for 3 minutes each, record status bar lag metrics; file refs: `crates/koe-cli/src/tui.rs`, `crates/koe-cli/src/main.rs`.
     - [ ] Kill the process mid-session and confirm recovery files exist.
         - Verify audio, transcript, notes, and metadata are present and readable, with `finalized=false`.
         - BLOCKED: Requires an interactive session and forced termination to inspect on-disk artifacts; cannot run or kill interactive process here; tried only code-level persistence checks; next steps: start `bun run koe`, speak for 1–2 minutes, kill process, confirm `~/.koe/sessions/{id}` contains `audio.raw`, `transcript.jsonl`, `notes.json`, `metadata.toml` with `finalized=false`; file refs: `crates/koe-cli/src/session.rs`.
@@ -368,7 +368,7 @@ Phase 5: TUI design polish
     │  · Need repo access shared       │  Me: Let's target Friday      │
     │    before EOD — Them             │  Them: Works for me           │
     │                                  │                               │
-    │ 12:34  ▁▂▃▅▃▂▁▂▃▅▃▂  asr:groq lag:1.2s chunks:42/0 segs:18       │
+    │ 12:34  ▁▂▃▅▃▂▁▂▃▅▃▂  transcribe:cloud lag:1.2s chunks:42/0 segs:18      │
     └──────────────────────────────────────────────────────────────────┘
     ```
 
@@ -386,8 +386,8 @@ Phase 5: TUI design polish
     │   meeting  end meeting                   │
     │   meeting  pause capture                 │
     │   meeting  force summarize               │
-    │   setting  switch ASR provider           │
-    │   setting  switch summarizer             │
+    │   setting  switch transcribe mode               │
+    │   setting  switch summarize mode                │
     │   setting  edit context                  │
     │      view  toggle transcript             │
     └──────────────────────────────────────────┘
@@ -404,15 +404,15 @@ Phase 5: TUI design polish
     - [x] Footer redesigned as three zones in one line (`crates/koe-cli/src/tui.rs`).
         - Left: meeting timer `MM:SS` or `H:MM:SS`; accent color when active, `--:--` muted when idle; frozen at final duration in post-meeting state.
         - Center-left: ASCII/Unicode audio waveform strip (10-20 chars); characters `~^-_` or block elements `▁▂▃▅▃▂▁`; either reactive (driven by audio RMS/peak from capture ring buffer, sampled every 50ms render tick) or ambient (randomized animation indicating capture active); flat `--------` when capture inactive; muted/dim color.
-        - Right: compact metrics cluster `asr:{provider} lag:{ms}s chunks:{emitted}/{dropped} segs:{count}`; all muted gray, ~40 chars; additional metrics (frames captured/dropped) appended if space allows.
+        - Right: compact metrics cluster `transcribe:{mode} lag:{ms}s chunks:{emitted}/{dropped} segs:{count}`; all muted gray, ~40 chars; additional metrics (frames captured/dropped) appended if space allows.
     - [x] Command palette: centered modal overlay triggered by `ctrl+p`, dismissed with `Esc` (`crates/koe-cli/src/tui.rs`).
         - Title "Command Palette" centered; `> ` filter input with cursor; fuzzy match narrows visible commands; up/down arrows to navigate, Enter to execute.
         - Command rows: right-aligned dim category tag, neutral command label; selection highlight in accent color background.
         - No footer in palette; version info already present in title bar. Keep palette clean and minimal.
         - Width ~60 chars, height fits content (max ~15 rows + header); modal blocks underlying input.
     - [x] Context-aware command sets driven by app state (`crates/koe-cli/src/tui.rs`).
-        - Idle: start meeting, switch ASR/summarizer provider, set ASR/summarizer model, edit context, toggle transcript, browse sessions.
-        - MeetingActive: end meeting, pause capture, force summarize, switch ASR/summarizer provider, edit context, toggle transcript.
+        - Idle: start meeting, switch transcribe/summarize mode, set transcribe/summarize model, edit context, toggle transcript, browse sessions.
+        - MeetingActive: end meeting, pause capture, force summarize, switch transcribe/summarize mode, edit context, toggle transcript.
         - PostMeeting: copy transcript/notes/audio path to clipboard, open session folder, export markdown, start new meeting, browse sessions.
     - [x] State machine: Idle -> MeetingActive -> PostMeeting -> Idle; drives palette commands, footer timer behavior, and audio viz state.
     - [x] Pane layout unchanged: notes-only default (full width); palette "toggle transcript" splits 55/45; notes always visible left, transcript right; last 200 segments; auto-scroll to bottom.
@@ -428,4 +428,4 @@ Phase 5: TUI design polish
 
 ## 9. Resolved Decisions
 
-macOS 15+ only (no legacy), Silero VAD for quality with tuned parameters, local + cloud providers for ASR and summarization from day one, stream-based speaker labeling (mic -> Me, system -> Them).
+macOS 15+ only (no legacy), Silero VAD for quality with tuned parameters, local + cloud providers for transcribe and summarize from day one, stream-based speaker labeling (mic -> Me, system -> Them).

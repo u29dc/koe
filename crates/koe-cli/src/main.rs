@@ -7,9 +7,9 @@ mod tui;
 
 use clap::{Parser, Subcommand};
 use config::{Config, ConfigPaths, ProviderConfig};
-use koe_core::asr::{AsrProvider, create_asr};
 use koe_core::capture::{CaptureConfig, create_capture, list_audio_inputs};
 use koe_core::process::ChunkRecvTimeoutError;
+use koe_core::transcribe::{TranscribeProvider, create_transcribe_provider};
 use koe_core::types::{AudioSource, CaptureStats, NotesPatch};
 use raw_audio::SharedRawAudioWriter;
 use session::SessionFactory;
@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
-use tui::{AsrCommand, UiEvent};
+use tui::{TranscribeCommand, UiEvent};
 
 #[derive(Parser)]
 #[command(name = "koe", version, about = "meeting transcription engine")]
@@ -37,23 +37,23 @@ enum Command {
 
 #[derive(Parser, Debug, Clone)]
 struct RunArgs {
-    /// ASR selection: local, cloud, whisper, or groq
+    /// Transcribe mode: local or cloud
     #[arg(long)]
-    asr: Option<String>,
+    transcribe: Option<String>,
 
-    /// Transcriber model. whisper: path to GGML file, groq: model name [default: whisper-large-v3-turbo]
+    /// Transcribe model override for the selected mode
+    #[arg(long, value_name = "model")]
+    transcribe_model: Option<String>,
+
+    /// Summarize mode: local or cloud
     #[arg(long)]
-    model_trn: Option<String>,
+    summarize: Option<String>,
 
-    /// Summarizer selection: local, cloud, ollama, or openrouter
-    #[arg(long)]
-    summarizer: Option<String>,
+    /// Summarize model override for the selected mode
+    #[arg(long, value_name = "model")]
+    summarize_model: Option<String>,
 
-    /// Summarizer model. ollama: model tag [default: qwen3:30b-a3b], openrouter: model id [default: google/gemini-2.5-flash]
-    #[arg(long)]
-    model_sum: Option<String>,
-
-    /// Meeting context to pass to summarizer and session metadata
+    /// Meeting context to pass to summarize and session metadata
     #[arg(long)]
     context: Option<String>,
 
@@ -64,30 +64,93 @@ struct RunArgs {
 
 #[derive(Debug, Clone)]
 struct ResolvedRunArgs {
-    asr: ResolvedProfile,
-    summarizer: ResolvedProfile,
+    transcribe_profiles: RuntimeProfiles,
+    summarize_profiles: RuntimeProfiles,
     context: Option<String>,
     participants: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
-struct ResolvedProfile {
-    provider: String,
-    model: Option<String>,
-    api_key: String,
+struct RuntimeProfiles {
+    active: String,
+    local: ProviderConfig,
+    cloud: ProviderConfig,
+}
+
+impl RuntimeProfiles {
+    fn from_config(active: &str, local: &ProviderConfig, cloud: &ProviderConfig) -> Self {
+        Self {
+            active: active.to_string(),
+            local: local.clone(),
+            cloud: cloud.clone(),
+        }
+    }
+
+    fn active_profile(&self) -> &ProviderConfig {
+        self.profile_for_mode(self.active.as_str())
+    }
+
+    fn active_profile_mut(&mut self) -> &mut ProviderConfig {
+        let is_cloud = self.active == "cloud";
+        if is_cloud {
+            &mut self.cloud
+        } else {
+            &mut self.local
+        }
+    }
+
+    fn profile_for_mode(&self, mode: &str) -> &ProviderConfig {
+        if mode == "cloud" {
+            &self.cloud
+        } else {
+            &self.local
+        }
+    }
+
+    fn profile_for_mode_mut(&mut self, mode: &str) -> &mut ProviderConfig {
+        if mode == "cloud" {
+            &mut self.cloud
+        } else {
+            &mut self.local
+        }
+    }
 }
 
 impl RunArgs {
-    fn resolve(self, config: &Config) -> ResolvedRunArgs {
-        let asr_profile = select_asr_profile(config, self.asr.as_deref());
-        let summarizer_profile = select_summarizer_profile(config, self.summarizer.as_deref());
+    fn resolve(self, config: &Config) -> Result<ResolvedRunArgs, String> {
+        let mut transcribe_profiles = RuntimeProfiles::from_config(
+            config.transcribe.active.as_str(),
+            &config.transcribe.local,
+            &config.transcribe.cloud,
+        );
+        let mut summarize_profiles = RuntimeProfiles::from_config(
+            config.summarize.active.as_str(),
+            &config.summarize.local,
+            &config.summarize.cloud,
+        );
 
-        let model_trn = self
-            .model_trn
-            .or_else(|| non_empty_value(asr_profile.model.as_str()));
-        let model_sum = self
-            .model_sum
-            .or_else(|| non_empty_value(summarizer_profile.model.as_str()));
+        apply_env_overrides(&mut transcribe_profiles, &mut summarize_profiles);
+
+        let transcribe_mode = select_mode(
+            transcribe_profiles.active.as_str(),
+            self.transcribe.as_deref(),
+            "transcribe",
+        )?;
+        let summarize_mode = select_mode(
+            summarize_profiles.active.as_str(),
+            self.summarize.as_deref(),
+            "summarize",
+        )?;
+        transcribe_profiles.active = transcribe_mode;
+        summarize_profiles.active = summarize_mode;
+
+        if let Some(model) = self.transcribe_model {
+            transcribe_profiles.active_profile_mut().model = model;
+        }
+        if let Some(model) = self.summarize_model {
+            summarize_profiles.active_profile_mut().model = model;
+        }
+
         let context = self.context.or_else(|| {
             let value = config.session.context.clone();
             if value.is_empty() { None } else { Some(value) }
@@ -100,63 +163,90 @@ impl RunArgs {
             .filter(|value| !value.is_empty())
             .collect();
 
-        ResolvedRunArgs {
-            asr: ResolvedProfile {
-                provider: asr_profile.provider.clone(),
-                model: model_trn,
-                api_key: asr_profile.api_key.clone(),
-            },
-            summarizer: ResolvedProfile {
-                provider: summarizer_profile.provider.clone(),
-                model: model_sum,
-                api_key: summarizer_profile.api_key.clone(),
-            },
+        Ok(ResolvedRunArgs {
+            transcribe_profiles,
+            summarize_profiles,
             context,
             participants,
+        })
+    }
+}
+
+fn select_mode(active: &str, selector: Option<&str>, label: &str) -> Result<String, String> {
+    match selector {
+        None => Ok(if active == "cloud" {
+            "cloud".to_string()
+        } else {
+            "local".to_string()
+        }),
+        Some("local") => Ok("local".to_string()),
+        Some("cloud") => Ok("cloud".to_string()),
+        Some(other) => Err(format!("{label} must be local or cloud (got {other})")),
+    }
+}
+
+fn env_override(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn apply_env_overrides(transcribe: &mut RuntimeProfiles, summarize: &mut RuntimeProfiles) {
+    if let Some(value) = env_override("KOE_TRANSCRIBE_LOCAL_MODEL") {
+        transcribe.local.model = value;
+    }
+    if let Some(value) = env_override("KOE_TRANSCRIBE_CLOUD_MODEL") {
+        transcribe.cloud.model = value;
+    }
+    if let Some(value) = env_override("KOE_TRANSCRIBE_CLOUD_API_KEY") {
+        transcribe.cloud.api_key = value;
+    }
+    if let Some(value) = env_override("KOE_SUMMARIZE_LOCAL_MODEL") {
+        summarize.local.model = value;
+    }
+    if let Some(value) = env_override("KOE_SUMMARIZE_CLOUD_MODEL") {
+        summarize.cloud.model = value;
+    }
+    if let Some(value) = env_override("KOE_SUMMARIZE_CLOUD_API_KEY") {
+        summarize.cloud.api_key = value;
+    }
+    if transcribe.cloud.api_key.trim().is_empty() {
+        if let Some(value) = env_override("GROQ_API_KEY") {
+            transcribe.cloud.api_key = value;
+        }
+    }
+    if summarize.cloud.api_key.trim().is_empty() {
+        if let Some(value) = env_override("OPENROUTER_API_KEY") {
+            summarize.cloud.api_key = value;
         }
     }
 }
 
-fn select_asr_profile<'a>(config: &'a Config, selector: Option<&str>) -> &'a ProviderConfig {
-    select_profile(
-        config.asr.active.as_str(),
-        &config.asr.local,
-        &config.asr.cloud,
-        selector,
-    )
-}
-
-fn select_summarizer_profile<'a>(config: &'a Config, selector: Option<&str>) -> &'a ProviderConfig {
-    select_profile(
-        config.summarizer.active.as_str(),
-        &config.summarizer.local,
-        &config.summarizer.cloud,
-        selector,
-    )
-}
-
-fn select_profile<'a>(
-    active: &str,
-    local: &'a ProviderConfig,
-    cloud: &'a ProviderConfig,
-    selector: Option<&str>,
-) -> &'a ProviderConfig {
-    let fallback = if active == "cloud" { cloud } else { local };
-    match selector {
-        Some("local") => local,
-        Some("cloud") => cloud,
-        Some(provider) if local.provider == provider => local,
-        Some(provider) if cloud.provider == provider => cloud,
-        _ => fallback,
-    }
-}
-
-fn non_empty_value(value: &str) -> Option<String> {
+fn non_empty_str(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         None
     } else {
-        Some(trimmed.to_string())
+        Some(trimmed)
+    }
+}
+
+fn looks_like_path(value: &str) -> bool {
+    value.ends_with(".bin") || value.contains('/') || value.contains(std::path::MAIN_SEPARATOR)
+}
+
+fn to_ui_profiles(runtime: &RuntimeProfiles) -> tui::ModeProfiles {
+    tui::ModeProfiles {
+        active: runtime.active.clone(),
+        local: tui::ProfileSummary {
+            provider: runtime.local.provider.clone(),
+            model: runtime.local.model.clone(),
+        },
+        cloud: tui::ProfileSummary {
+            provider: runtime.cloud.provider.clone(),
+            model: runtime.cloud.model.clone(),
+        },
     }
 }
 
@@ -199,44 +289,37 @@ fn main() {
         }
     }
 
-    let run = cli.run.resolve(&config);
-    apply_config_env(&run);
+    let mut run = match cli.run.resolve(&config) {
+        Ok(run) => run,
+        Err(err) => {
+            eprintln!("run args error: {err}");
+            std::process::exit(1);
+        }
+    };
     let stats = CaptureStats::new();
     let stats_display = stats.clone();
     let models_dir = paths.models_dir.clone();
 
-    let whisper_model_env = std::env::var("KOE_WHISPER_MODEL").ok();
-    let groq_model_env = std::env::var("KOE_GROQ_MODEL").ok();
-    let mut whisper_model = match run.asr.provider.as_str() {
-        "whisper" => run.asr.model.clone().or(whisper_model_env),
-        _ => whisper_model_env,
-    };
-    let groq_model = match run.asr.provider.as_str() {
-        "groq" => run.asr.model.clone().or(groq_model_env),
-        _ => groq_model_env,
-    };
-
-    if run.asr.provider == "whisper" {
-        let hint = run.asr.model.as_deref();
-        if let Err(e) = ensure_whisper_model(&mut whisper_model, hint, &models_dir) {
+    if run.transcribe_profiles.active_profile().provider == "whisper" {
+        let profile = run.transcribe_profiles.active_profile_mut();
+        if let Err(e) = ensure_whisper_model(&mut profile.model, &models_dir) {
             eprintln!("init failed: {e}");
             std::process::exit(1);
         }
     }
 
-    let asr_models = tui::AsrModels::new(whisper_model.clone(), groq_model.clone());
+    let transcribe_profiles_ui = to_ui_profiles(&run.transcribe_profiles);
+    let summarize_profiles_ui = to_ui_profiles(&run.summarize_profiles);
 
-    let mut asr = match create_asr(
-        run.asr.provider.as_str(),
-        model_for_provider(
-            run.asr.provider.as_str(),
-            &whisper_model,
-            groq_model.as_deref(),
-        ),
+    let active_transcribe = run.transcribe_profiles.active_profile();
+    let mut transcribe = match create_transcribe_provider(
+        active_transcribe.provider.as_str(),
+        Some(active_transcribe.model.as_str()),
+        non_empty_str(active_transcribe.api_key.as_str()),
     ) {
         Ok(provider) => provider,
         Err(e) => {
-            eprintln!("asr init failed: {e}");
+            eprintln!("transcribe init failed: {e}");
             std::process::exit(1);
         }
     };
@@ -271,109 +354,134 @@ fn main() {
             }
         };
 
-    let asr_name = asr.name().to_string();
     let (ui_tx, ui_rx) = mpsc::channel();
     let _ = ui_tx.send(UiEvent::NotesPatch(NotesPatch { ops: Vec::new() }));
-    let (asr_cmd_tx, asr_cmd_rx) = mpsc::channel();
+    let (transcribe_cmd_tx, transcribe_cmd_rx) = mpsc::channel();
+    let mut transcribe_profiles_runtime = run.transcribe_profiles.clone();
 
-    let asr_thread = match thread::Builder::new()
-        .name("koe-asr".into())
-        .spawn(move || {
-            let mut current_provider = run.asr.provider.clone();
-            let mut whisper_model = whisper_model;
-            let groq_model = groq_model;
-            let models_dir = models_dir.clone();
+    let transcribe_thread =
+        match thread::Builder::new()
+            .name("koe-transcribe".into())
+            .spawn(move || {
+                let mut current_mode = transcribe_profiles_runtime.active.clone();
+                let models_dir = models_dir.clone();
 
-            let send_status = |name: String, connected: bool| {
-                let _ = ui_tx.send(UiEvent::AsrStatus { name, connected });
-            };
+                let send_status = |mode: String, provider: String, connected: bool| {
+                    let _ = ui_tx.send(UiEvent::TranscribeStatus {
+                        mode,
+                        provider,
+                        connected,
+                    });
+                };
 
-            send_status(asr.name().to_string(), true);
-            let mut latency_ms: Option<u128> = None;
+                let active_profile = transcribe_profiles_runtime.active_profile();
+                send_status(current_mode.clone(), active_profile.provider.clone(), true);
+                let mut latency_ms: Option<u128> = None;
 
-            loop {
-                while let Ok(cmd) = asr_cmd_rx.try_recv() {
-                    match cmd {
-                        AsrCommand::ToggleProvider => {
-                            let next = if current_provider == "whisper" {
-                                "groq"
-                            } else {
-                                "whisper"
-                            };
-
-                            let next_model = match next {
-                                "whisper" => {
+                loop {
+                    while let Ok(cmd) = transcribe_cmd_rx.try_recv() {
+                        match cmd {
+                            TranscribeCommand::ToggleMode => {
+                                let next_mode = if current_mode == "cloud" {
+                                    "local"
+                                } else {
+                                    "cloud"
+                                };
+                                let next_profile =
+                                    transcribe_profiles_runtime.profile_for_mode_mut(next_mode);
+                                if next_profile.provider == "whisper" {
                                     if let Err(e) =
-                                        ensure_whisper_model(&mut whisper_model, None, &models_dir)
+                                        ensure_whisper_model(&mut next_profile.model, &models_dir)
                                     {
                                         eprintln!("init failed: {e}");
+                                        let current_profile = transcribe_profiles_runtime
+                                            .profile_for_mode(&current_mode);
+                                        send_status(
+                                            current_mode.clone(),
+                                            current_profile.provider.clone(),
+                                            false,
+                                        );
                                         continue;
                                     }
-                                    whisper_model.as_deref()
                                 }
-                                "groq" => groq_model.as_deref(),
-                                _ => None,
-                            };
 
-                            match create_asr(next, next_model) {
-                                Ok(provider) => {
-                                    asr = provider;
-                                    current_provider = next.to_string();
-                                    send_status(asr.name().to_string(), true);
-                                }
-                                Err(e) => {
-                                    eprintln!("asr switch failed: {e}");
-                                    send_status(current_provider.clone(), false);
+                                match create_transcribe_provider(
+                                    next_profile.provider.as_str(),
+                                    Some(next_profile.model.as_str()),
+                                    non_empty_str(next_profile.api_key.as_str()),
+                                ) {
+                                    Ok(provider) => {
+                                        transcribe = provider;
+                                        current_mode = next_mode.to_string();
+                                        transcribe_profiles_runtime.active = current_mode.clone();
+                                        let active_profile =
+                                            transcribe_profiles_runtime.active_profile();
+                                        send_status(
+                                            current_mode.clone(),
+                                            active_profile.provider.clone(),
+                                            true,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        eprintln!("transcribe switch failed: {e}");
+                                        let current_profile = transcribe_profiles_runtime
+                                            .profile_for_mode(&current_mode);
+                                        send_status(
+                                            current_mode.clone(),
+                                            current_profile.provider.clone(),
+                                            false,
+                                        );
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                let chunk = match chunk_rx.recv_timeout(Duration::from_millis(50)) {
-                    Ok(chunk) => chunk,
-                    Err(ChunkRecvTimeoutError::Timeout) => continue,
-                    Err(ChunkRecvTimeoutError::Disconnected) => break,
-                };
+                    let chunk = match chunk_rx.recv_timeout(Duration::from_millis(50)) {
+                        Ok(chunk) => chunk,
+                        Err(ChunkRecvTimeoutError::Timeout) => continue,
+                        Err(ChunkRecvTimeoutError::Disconnected) => break,
+                    };
 
-                let (mut segments, elapsed) = match transcribe_with_latency(asr.as_mut(), &chunk) {
-                    Ok(result) => result,
-                    Err(e) => {
-                        eprintln!("asr error: {e}");
+                    let (mut segments, elapsed) =
+                        match transcribe_with_latency(transcribe.as_mut(), &chunk) {
+                            Ok(result) => result,
+                            Err(e) => {
+                                eprintln!("transcribe error: {e}");
+                                continue;
+                            }
+                        };
+
+                    let smoothed = match latency_ms {
+                        Some(prev) => (prev * 9 + elapsed) / 10,
+                        None => elapsed,
+                    };
+                    latency_ms = Some(smoothed);
+                    let _ = ui_tx.send(UiEvent::TranscribeLag { last_ms: smoothed });
+
+                    if segments.is_empty() {
                         continue;
                     }
-                };
 
-                let smoothed = match latency_ms {
-                    Some(prev) => (prev * 9 + elapsed) / 10,
-                    None => elapsed,
-                };
-                latency_ms = Some(smoothed);
-                let _ = ui_tx.send(UiEvent::AsrLag { last_ms: smoothed });
-
-                if segments.is_empty() {
-                    continue;
-                }
-
-                if let Some(speaker) = default_speaker(chunk.source) {
-                    for seg in &mut segments {
-                        if seg.speaker.is_none() {
-                            seg.speaker = Some(speaker.to_string());
+                    if let Some(speaker) = default_speaker(chunk.source) {
+                        for seg in &mut segments {
+                            if seg.speaker.is_none() {
+                                seg.speaker = Some(speaker.to_string());
+                            }
                         }
                     }
-                }
 
-                if ui_tx.send(UiEvent::Transcript(segments)).is_err() {
-                    break;
+                    if ui_tx.send(UiEvent::Transcript(segments)).is_err() {
+                        break;
+                    }
                 }
+            }) {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                eprintln!("transcribe thread spawn failed: {e}");
+                std::process::exit(1);
             }
-        }) {
-        Ok(handle) => Some(handle),
-        Err(e) => {
-            eprintln!("asr thread spawn failed: {e}");
-            std::process::exit(1);
-        }
-    };
+        };
 
     let export_dir = export_dir_from_config(&paths, &config.session.export_dir);
     let session_factory = SessionFactory::new(
@@ -387,16 +495,14 @@ fn main() {
         processor,
         ui_rx,
         stats: stats_display,
-        asr_name,
-        asr_cmd_tx,
+        transcribe_cmd_tx,
         ui_config: config.ui.clone(),
         session_factory,
         shared_writer,
         initial_context: run.context.clone().unwrap_or_default(),
         participants: run.participants.clone(),
-        summarizer_provider: run.summarizer.provider.clone(),
-        summarizer_model: run.summarizer.model.clone().unwrap_or_default(),
-        asr_models,
+        transcribe_profiles: transcribe_profiles_ui,
+        summarize_profiles: summarize_profiles_ui,
     };
 
     if let Err(e) = tui::run(ctx) {
@@ -404,7 +510,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    if let Some(handle) = asr_thread {
+    if let Some(handle) = transcribe_thread {
         let _ = handle.join();
     }
 }
@@ -417,47 +523,26 @@ fn default_speaker(source: AudioSource) -> Option<&'static str> {
     }
 }
 
-fn ensure_whisper_model(
-    model: &mut Option<String>,
-    hint: Option<&str>,
-    models_dir: &std::path::Path,
-) -> Result<(), String> {
-    let candidate = hint
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string())
-        .or_else(|| model.clone());
+fn ensure_whisper_model(model: &mut String, models_dir: &std::path::Path) -> Result<(), String> {
+    let trimmed = model.trim();
+    let candidate = if trimmed.is_empty() {
+        init::DEFAULT_WHISPER_MODEL.to_string()
+    } else {
+        trimmed.to_string()
+    };
 
-    if let Some(value) = candidate.as_deref() {
-        let is_path = value.ends_with(".bin")
-            || value.contains(std::path::MAIN_SEPARATOR)
-            || value.contains('/');
-        if is_path {
-            let path = std::path::Path::new(value);
-            if path.exists() {
-                *model = Some(value.to_string());
-                return Ok(());
-            }
-            return Err(format!("whisper model not found at {}", path.display()));
+    if looks_like_path(candidate.as_str()) {
+        let path = std::path::Path::new(candidate.as_str());
+        if path.exists() {
+            *model = candidate;
+            return Ok(());
         }
+        return Err(format!("whisper model not found at {}", path.display()));
     }
 
-    let model_name = candidate.unwrap_or_else(|| init::DEFAULT_WHISPER_MODEL.to_string());
-    let path = init::download_model(&model_name, models_dir, false).map_err(|e| e.to_string())?;
-    *model = Some(path.to_string_lossy().to_string());
+    let path = init::download_model(&candidate, models_dir, false).map_err(|e| e.to_string())?;
+    *model = path.to_string_lossy().to_string();
     Ok(())
-}
-
-fn model_for_provider<'a>(
-    provider: &str,
-    whisper_model: &'a Option<String>,
-    groq_model: Option<&'a str>,
-) -> Option<&'a str> {
-    match provider {
-        "whisper" => whisper_model.as_deref(),
-        "groq" => groq_model,
-        _ => None,
-    }
 }
 
 fn export_dir_from_config(paths: &ConfigPaths, value: &str) -> Option<PathBuf> {
@@ -521,38 +606,19 @@ fn select_default_microphone(inputs: &[koe_core::capture::AudioInputDeviceInfo])
 }
 
 fn transcribe_with_latency(
-    asr: &mut dyn AsrProvider,
+    transcribe: &mut dyn TranscribeProvider,
     chunk: &koe_core::types::AudioChunk,
-) -> Result<(Vec<koe_core::types::TranscriptSegment>, u128), koe_core::AsrError> {
+) -> Result<(Vec<koe_core::types::TranscriptSegment>, u128), koe_core::TranscribeError> {
     let start = Instant::now();
-    let segments = asr.transcribe(chunk)?;
+    let segments = transcribe.transcribe(chunk)?;
     Ok((segments, start.elapsed().as_millis()))
-}
-
-fn apply_config_env(run: &ResolvedRunArgs) {
-    if run.asr.provider == "groq"
-        && !run.asr.api_key.trim().is_empty()
-        && std::env::var("GROQ_API_KEY").is_err()
-    {
-        unsafe {
-            std::env::set_var("GROQ_API_KEY", run.asr.api_key.trim());
-        }
-    }
-    if run.summarizer.provider == "openrouter"
-        && !run.summarizer.api_key.trim().is_empty()
-        && std::env::var("OPENROUTER_API_KEY").is_err()
-    {
-        unsafe {
-            std::env::set_var("OPENROUTER_API_KEY", run.summarizer.api_key.trim());
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{default_speaker, select_default_microphone, transcribe_with_latency};
-    use koe_core::asr::AsrProvider;
     use koe_core::capture::AudioInputDeviceInfo;
+    use koe_core::transcribe::TranscribeProvider;
     use koe_core::types::{AudioChunk, AudioSource, TranscriptSegment};
     use std::time::Duration;
 
@@ -563,11 +629,11 @@ mod tests {
         assert_eq!(default_speaker(AudioSource::Mixed), Some("Unknown"));
     }
 
-    struct DummyAsr {
+    struct DummyTranscribe {
         delay: Duration,
     }
 
-    impl AsrProvider for DummyAsr {
+    impl TranscribeProvider for DummyTranscribe {
         fn name(&self) -> &'static str {
             "dummy"
         }
@@ -575,7 +641,7 @@ mod tests {
         fn transcribe(
             &mut self,
             _chunk: &AudioChunk,
-        ) -> Result<Vec<TranscriptSegment>, koe_core::AsrError> {
+        ) -> Result<Vec<TranscriptSegment>, koe_core::TranscribeError> {
             std::thread::sleep(self.delay);
             Ok(vec![TranscriptSegment {
                 id: 0,
@@ -590,7 +656,7 @@ mod tests {
 
     #[test]
     fn transcribe_latency_under_budget() {
-        let mut asr = DummyAsr {
+        let mut transcribe = DummyTranscribe {
             delay: Duration::from_millis(20),
         };
         let chunk = AudioChunk {
@@ -599,7 +665,7 @@ mod tests {
             sample_rate_hz: 16_000,
             pcm_mono_f32: vec![0.0; 160],
         };
-        let (_segments, elapsed) = transcribe_with_latency(&mut asr, &chunk).unwrap();
+        let (_segments, elapsed) = transcribe_with_latency(&mut transcribe, &chunk).unwrap();
         assert!(elapsed < 4_000);
     }
 

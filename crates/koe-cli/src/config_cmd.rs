@@ -124,104 +124,104 @@ fn apply_set(config: &mut Config, assignment: &str) -> Result<(), ConfigError> {
         "audio.microphone_device_id" => {
             config.audio.microphone_device_id = value.to_string();
         }
-        "asr.active" => {
-            config.asr.active = value.to_string();
+        "transcribe.active" => {
+            config.transcribe.active = value.to_string();
         }
-        "asr.local.provider" => {
-            config.asr.local.provider = value.to_string();
+        "transcribe.local.provider" => {
+            config.transcribe.local.provider = value.to_string();
         }
-        "asr.local.model" => {
-            config.asr.local.model = value.to_string();
+        "transcribe.local.model" => {
+            config.transcribe.local.model = value.to_string();
         }
-        "asr.local.api_key" => {
-            config.asr.local.api_key = value.to_string();
+        "transcribe.local.api_key" => {
+            config.transcribe.local.api_key = value.to_string();
         }
-        "asr.cloud.provider" => {
-            config.asr.cloud.provider = value.to_string();
+        "transcribe.cloud.provider" => {
+            config.transcribe.cloud.provider = value.to_string();
         }
-        "asr.cloud.model" => {
-            config.asr.cloud.model = value.to_string();
+        "transcribe.cloud.model" => {
+            config.transcribe.cloud.model = value.to_string();
         }
-        "asr.cloud.api_key" => {
-            config.asr.cloud.api_key = value.to_string();
+        "transcribe.cloud.api_key" => {
+            config.transcribe.cloud.api_key = value.to_string();
         }
-        "asr.provider" => {
+        "transcribe.provider" => {
             set_active_provider(
-                "asr.provider",
-                &config.asr.active,
+                "transcribe.provider",
+                &config.transcribe.active,
                 value,
-                &mut config.asr.local.provider,
-                &mut config.asr.cloud.provider,
+                &mut config.transcribe.local.provider,
+                &mut config.transcribe.cloud.provider,
             )?;
         }
-        "asr.model" => {
+        "transcribe.model" => {
             set_active_value(
-                "asr.model",
-                &config.asr.active,
+                "transcribe.model",
+                &config.transcribe.active,
                 value,
-                &mut config.asr.local.model,
-                &mut config.asr.cloud.model,
+                &mut config.transcribe.local.model,
+                &mut config.transcribe.cloud.model,
             )?;
         }
-        "asr.api_key" => {
+        "transcribe.api_key" => {
             set_active_value(
-                "asr.api_key",
-                &config.asr.active,
+                "transcribe.api_key",
+                &config.transcribe.active,
                 value,
-                &mut config.asr.local.api_key,
-                &mut config.asr.cloud.api_key,
+                &mut config.transcribe.local.api_key,
+                &mut config.transcribe.cloud.api_key,
             )?;
         }
-        "summarizer.active" => {
-            config.summarizer.active = value.to_string();
+        "summarize.active" => {
+            config.summarize.active = value.to_string();
         }
-        "summarizer.local.provider" => {
-            config.summarizer.local.provider = value.to_string();
+        "summarize.local.provider" => {
+            config.summarize.local.provider = value.to_string();
         }
-        "summarizer.local.model" => {
-            config.summarizer.local.model = value.to_string();
+        "summarize.local.model" => {
+            config.summarize.local.model = value.to_string();
         }
-        "summarizer.local.api_key" => {
-            config.summarizer.local.api_key = value.to_string();
+        "summarize.local.api_key" => {
+            config.summarize.local.api_key = value.to_string();
         }
-        "summarizer.cloud.provider" => {
-            config.summarizer.cloud.provider = value.to_string();
+        "summarize.cloud.provider" => {
+            config.summarize.cloud.provider = value.to_string();
         }
-        "summarizer.cloud.model" => {
-            config.summarizer.cloud.model = value.to_string();
+        "summarize.cloud.model" => {
+            config.summarize.cloud.model = value.to_string();
         }
-        "summarizer.cloud.api_key" => {
-            config.summarizer.cloud.api_key = value.to_string();
+        "summarize.cloud.api_key" => {
+            config.summarize.cloud.api_key = value.to_string();
         }
-        "summarizer.provider" => {
+        "summarize.provider" => {
             set_active_provider(
-                "summarizer.provider",
-                &config.summarizer.active,
+                "summarize.provider",
+                &config.summarize.active,
                 value,
-                &mut config.summarizer.local.provider,
-                &mut config.summarizer.cloud.provider,
+                &mut config.summarize.local.provider,
+                &mut config.summarize.cloud.provider,
             )?;
         }
-        "summarizer.model" => {
+        "summarize.model" => {
             set_active_value(
-                "summarizer.model",
-                &config.summarizer.active,
+                "summarize.model",
+                &config.summarize.active,
                 value,
-                &mut config.summarizer.local.model,
-                &mut config.summarizer.cloud.model,
+                &mut config.summarize.local.model,
+                &mut config.summarize.cloud.model,
             )?;
         }
-        "summarizer.api_key" => {
+        "summarize.api_key" => {
             set_active_value(
-                "summarizer.api_key",
-                &config.summarizer.active,
+                "summarize.api_key",
+                &config.summarize.active,
                 value,
-                &mut config.summarizer.local.api_key,
-                &mut config.summarizer.cloud.api_key,
+                &mut config.summarize.local.api_key,
+                &mut config.summarize.cloud.api_key,
             )?;
         }
-        "summarizer.prompt_profile" => {
-            config.summarizer.prompt_profile = value.to_string();
+        "summarize.prompt_profile" => {
+            config.summarize.prompt_profile = value.to_string();
         }
         "session.context" => {
             config.session.context = value.to_string();

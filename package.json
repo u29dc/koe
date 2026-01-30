@@ -13,12 +13,13 @@
 		"util:format": "cargo fmt --all",
 		"util:lint": "cargo clippy --all-targets --all-features -- -D warnings",
 		"util:test": "cargo test --all",
-		"util:check": "bun run util:format && bun run util:lint && bun run util:test"
+		"util:check": "STATUS=0; bun run util:format || STATUS=1; bun run util:lint || STATUS=1; bun run util:test || STATUS=1; exit $STATUS",
+		"util:clean": "cargo clean"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.3.13",
-		"@commitlint/cli": "^20.3.1",
-		"@commitlint/config-conventional": "^20.3.1",
+		"@commitlint/cli": "^20.4.0",
+		"@commitlint/config-conventional": "^20.4.0",
 		"husky": "^9.1.7",
 		"lint-staged": "^16.2.7"
 	}

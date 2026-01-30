@@ -47,10 +47,10 @@ pub struct SessionMetadata {
     pub audio_wav_file: String,
     pub transcript_file: String,
     pub notes_file: String,
-    pub asr_provider: String,
-    pub asr_model: String,
-    pub summarizer_provider: String,
-    pub summarizer_model: String,
+    pub transcribe_provider: String,
+    pub transcribe_model: String,
+    pub summarize_provider: String,
+    pub summarize_model: String,
 }
 
 #[derive(Debug, Clone)]
@@ -60,10 +60,10 @@ pub struct SessionMetadataInput {
     pub audio_sample_rate_hz: u32,
     pub audio_channels: u16,
     pub audio_sources: Vec<String>,
-    pub asr_provider: String,
-    pub asr_model: String,
-    pub summarizer_provider: String,
-    pub summarizer_model: String,
+    pub transcribe_provider: String,
+    pub transcribe_model: String,
+    pub summarize_provider: String,
+    pub summarize_model: String,
 }
 
 #[derive(Debug, Clone)]
@@ -94,10 +94,10 @@ impl SessionFactory {
 
     pub fn create(
         &self,
-        asr_provider: String,
-        asr_model: String,
-        summarizer_provider: String,
-        summarizer_model: String,
+        transcribe_provider: String,
+        transcribe_model: String,
+        summarize_provider: String,
+        summarize_model: String,
         context: Option<String>,
         participants: Vec<String>,
     ) -> Result<SessionHandle, SessionError> {
@@ -107,10 +107,10 @@ impl SessionFactory {
             audio_sample_rate_hz: self.audio_sample_rate_hz,
             audio_channels: self.audio_channels,
             audio_sources: self.audio_sources.clone(),
-            asr_provider,
-            asr_model,
-            summarizer_provider,
-            summarizer_model,
+            transcribe_provider,
+            transcribe_model,
+            summarize_provider,
+            summarize_model,
         })?;
         SessionHandle::start(&self.paths, metadata, self.export_dir.clone())
     }
@@ -149,10 +149,10 @@ impl SessionMetadata {
             audio_wav_file,
             transcript_file,
             notes_file,
-            asr_provider: input.asr_provider,
-            asr_model: input.asr_model,
-            summarizer_provider: input.summarizer_provider,
-            summarizer_model: input.summarizer_model,
+            transcribe_provider: input.transcribe_provider,
+            transcribe_model: input.transcribe_model,
+            summarize_provider: input.summarize_provider,
+            summarize_model: input.summarize_model,
         })
     }
 }
@@ -220,19 +220,23 @@ impl SessionHandle {
         Ok(root.join("notes.md"))
     }
 
-    pub fn update_asr(&mut self, provider: String, model: String) -> Result<(), SessionError> {
-        self.metadata.asr_provider = provider;
-        self.metadata.asr_model = model;
-        self.touch_metadata()
-    }
-
-    pub fn update_summarizer(
+    pub fn update_transcribe(
         &mut self,
         provider: String,
         model: String,
     ) -> Result<(), SessionError> {
-        self.metadata.summarizer_provider = provider;
-        self.metadata.summarizer_model = model;
+        self.metadata.transcribe_provider = provider;
+        self.metadata.transcribe_model = model;
+        self.touch_metadata()
+    }
+
+    pub fn update_summarize(
+        &mut self,
+        provider: String,
+        model: String,
+    ) -> Result<(), SessionError> {
+        self.metadata.summarize_provider = provider;
+        self.metadata.summarize_model = model;
         self.touch_metadata()
     }
 
@@ -477,10 +481,10 @@ mod tests {
             audio_sample_rate_hz: 48_000,
             audio_channels: 1,
             audio_sources: vec!["system".to_string()],
-            asr_provider: "whisper".to_string(),
-            asr_model: "base.en".to_string(),
-            summarizer_provider: "ollama".to_string(),
-            summarizer_model: "qwen3:30b-a3b".to_string(),
+            transcribe_provider: "whisper".to_string(),
+            transcribe_model: "base.en".to_string(),
+            summarize_provider: "ollama".to_string(),
+            summarize_model: "qwen3:30b-a3b".to_string(),
         })
         .unwrap();
         let session_id = metadata.id.clone();

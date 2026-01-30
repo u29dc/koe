@@ -23,46 +23,76 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy)]
-pub enum AsrCommand {
-    ToggleProvider,
+pub enum TranscribeCommand {
+    ToggleMode,
 }
 
 pub enum UiEvent {
     Transcript(Vec<TranscriptSegment>),
     NotesPatch(NotesPatch),
-    AsrStatus { name: String, connected: bool },
-    AsrLag { last_ms: u128 },
+    TranscribeStatus {
+        mode: String,
+        provider: String,
+        connected: bool,
+    },
+    TranscribeLag {
+        last_ms: u128,
+    },
 }
 
 #[derive(Debug, Clone)]
-pub struct AsrModels {
-    whisper: Option<String>,
-    groq: Option<String>,
+pub struct ProfileSummary {
+    pub provider: String,
+    pub model: String,
 }
 
-impl AsrModels {
-    pub fn new(whisper: Option<String>, groq: Option<String>) -> Self {
-        Self { whisper, groq }
+#[derive(Debug, Clone)]
+pub struct ModeProfiles {
+    pub active: String,
+    pub local: ProfileSummary,
+    pub cloud: ProfileSummary,
+}
+
+impl ModeProfiles {
+    fn active_profile(&self) -> &ProfileSummary {
+        self.profile_for_mode(self.active.as_str())
     }
 
-    fn model_for(&self, provider: &str) -> String {
-        match provider {
-            "whisper" => self.whisper.clone().unwrap_or_default(),
-            "groq" => self.groq.clone().unwrap_or_default(),
-            _ => String::new(),
+    fn active_profile_mut(&mut self) -> &mut ProfileSummary {
+        let is_cloud = self.active == "cloud";
+        if is_cloud {
+            &mut self.cloud
+        } else {
+            &mut self.local
         }
     }
 
-    fn update_model(&mut self, provider: &str, model: String) {
-        match provider {
-            "whisper" => self.whisper = Some(model),
-            "groq" => self.groq = Some(model),
-            _ => {}
+    fn profile_for_mode(&self, mode: &str) -> &ProfileSummary {
+        if mode == "cloud" {
+            &self.cloud
+        } else {
+            &self.local
         }
     }
 
-    fn current_model(&self, provider: &str) -> String {
-        self.model_for(provider)
+    fn profile_for_mode_mut(&mut self, mode: &str) -> &mut ProfileSummary {
+        if mode == "cloud" {
+            &mut self.cloud
+        } else {
+            &mut self.local
+        }
+    }
+
+    fn switch_mode(&mut self) {
+        self.active = if self.active == "cloud" {
+            "local".to_string()
+        } else {
+            "cloud".to_string()
+        };
+    }
+
+    fn set_provider(&mut self, mode: &str, provider: String) {
+        self.profile_for_mode_mut(mode).provider = provider;
     }
 }
 
@@ -70,16 +100,14 @@ pub struct TuiContext {
     pub processor: AudioProcessor,
     pub ui_rx: Receiver<UiEvent>,
     pub stats: CaptureStats,
-    pub asr_name: String,
-    pub asr_cmd_tx: Sender<AsrCommand>,
+    pub transcribe_cmd_tx: Sender<TranscribeCommand>,
     pub ui_config: UiConfig,
     pub session_factory: SessionFactory,
     pub shared_writer: SharedRawAudioWriter,
     pub initial_context: String,
     pub participants: Vec<String>,
-    pub summarizer_provider: String,
-    pub summarizer_model: String,
-    pub asr_models: AsrModels,
+    pub transcribe_profiles: ModeProfiles,
+    pub summarize_profiles: ModeProfiles,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,8 +163,8 @@ impl PaletteState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextInputKind {
     Context,
-    AsrModel,
-    SummarizerModel,
+    TranscribeModel,
+    SummarizeModel,
 }
 
 #[derive(Debug, Clone)]
@@ -159,10 +187,10 @@ enum PaletteCommandId {
     PauseCapture,
     ResumeCapture,
     ForceSummarize,
-    SwitchAsrProvider,
-    SwitchSummarizer,
-    SetAsrModel,
-    SetSummarizerModel,
+    SwitchTranscribeMode,
+    SwitchSummarizeMode,
+    SetTranscribeModel,
+    SetSummarizeModel,
     EditContext,
     ToggleTranscript,
     BrowseSessions,
@@ -211,10 +239,8 @@ impl Waveform {
 struct StartMeetingInput<'a> {
     factory: &'a SessionFactory,
     shared_writer: &'a SharedRawAudioWriter,
-    asr_provider: &'a str,
-    asr_models: &'a AsrModels,
-    summarizer_provider: &'a str,
-    summarizer_model: &'a str,
+    transcribe_profiles: &'a ModeProfiles,
+    summarize_profiles: &'a ModeProfiles,
     context: &'a str,
     participants: &'a [String],
 }
@@ -224,9 +250,9 @@ struct FooterState<'a> {
     capture_paused: bool,
     elapsed: Duration,
     waveform: &'a Waveform,
-    asr_name: &'a str,
-    asr_connected: bool,
-    asr_lag_ms: Option<u128>,
+    transcribe_mode: &'a str,
+    transcribe_connected: bool,
+    transcribe_lag_ms: Option<u128>,
     stats: &'a CaptureStats,
     ledger: &'a TranscriptLedger,
 }
@@ -263,9 +289,8 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
     let mut meeting_state = MeetingState::default();
     let mut transcript_lines = render_transcript_lines(&ledger, &theme);
     let mut notes_lines = render_notes_lines(&meeting_state, &theme);
-    let mut asr_name = ctx.asr_name;
-    let mut asr_connected = true;
-    let mut asr_lag_ms: Option<u128> = None;
+    let mut transcribe_connected = true;
+    let mut transcribe_lag_ms: Option<u128> = None;
     let mut show_transcript = if ctx.ui_config.notes_only_default {
         false
     } else {
@@ -277,9 +302,8 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
     let mut meeting_elapsed = Duration::ZERO;
     let mut capture_paused = true;
     let mut context = ctx.initial_context.clone();
-    let mut summarizer_provider = ctx.summarizer_provider.clone();
-    let mut summarizer_model = ctx.summarizer_model.clone();
-    let mut asr_models = ctx.asr_models.clone();
+    let mut transcribe_profiles = ctx.transcribe_profiles.clone();
+    let mut summarize_profiles = ctx.summarize_profiles.clone();
     let mut session: Option<SessionHandle> = None;
     let mut session_finalized = false;
     let mut waveform = Waveform::new();
@@ -314,22 +338,29 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                         notes_lines = render_notes_lines(&meeting_state, &theme);
                     }
                 }
-                Ok(UiEvent::AsrStatus { name, connected }) => {
-                    asr_name = name;
-                    asr_connected = connected;
+                Ok(UiEvent::TranscribeStatus {
+                    mode,
+                    provider,
+                    connected,
+                }) => {
+                    transcribe_profiles.active = mode.clone();
+                    transcribe_profiles.set_provider(&mode, provider);
+                    transcribe_connected = connected;
                     if let Some(active_session) = session.as_mut() {
-                        let model = asr_models.model_for(&asr_name);
-                        if let Err(err) = active_session.update_asr(asr_name.clone(), model) {
-                            eprintln!("session asr update failed: {err}");
+                        let profile = transcribe_profiles.active_profile();
+                        if let Err(err) = active_session
+                            .update_transcribe(profile.provider.clone(), profile.model.clone())
+                        {
+                            eprintln!("session transcribe update failed: {err}");
                         }
                     }
                 }
-                Ok(UiEvent::AsrLag { last_ms }) => {
-                    asr_lag_ms = Some(last_ms);
+                Ok(UiEvent::TranscribeLag { last_ms }) => {
+                    transcribe_lag_ms = Some(last_ms);
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    asr_connected = false;
+                    transcribe_connected = false;
                     break;
                 }
             }
@@ -380,9 +411,9 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                 capture_paused,
                 elapsed: meeting_elapsed,
                 waveform: &waveform,
-                asr_name: &asr_name,
-                asr_connected,
-                asr_lag_ms,
+                transcribe_mode: transcribe_profiles.active.as_str(),
+                transcribe_connected,
+                transcribe_lag_ms,
                 stats: &ctx.stats,
                 ledger: &ledger,
             };
@@ -445,10 +476,8 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                         let start_input = StartMeetingInput {
                                             factory: &ctx.session_factory,
                                             shared_writer: &ctx.shared_writer,
-                                            asr_provider: &asr_name,
-                                            asr_models: &asr_models,
-                                            summarizer_provider: &summarizer_provider,
-                                            summarizer_model: &summarizer_model,
+                                            transcribe_profiles: &transcribe_profiles,
+                                            summarize_profiles: &summarize_profiles,
                                             context: &context,
                                             participants: &ctx.participants,
                                         };
@@ -497,38 +526,39 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                         capture_paused = false;
                                     }
                                     PaletteCommandId::ForceSummarize => {}
-                                    PaletteCommandId::SwitchAsrProvider => {
-                                        let _ = ctx.asr_cmd_tx.send(AsrCommand::ToggleProvider);
+                                    PaletteCommandId::SwitchTranscribeMode => {
+                                        let _ = ctx
+                                            .transcribe_cmd_tx
+                                            .send(TranscribeCommand::ToggleMode);
                                     }
-                                    PaletteCommandId::SwitchSummarizer => {
-                                        summarizer_provider = if summarizer_provider == "ollama" {
-                                            "openrouter".to_string()
-                                        } else {
-                                            "ollama".to_string()
-                                        };
+                                    PaletteCommandId::SwitchSummarizeMode => {
+                                        summarize_profiles.switch_mode();
                                         if let Some(active_session) = session.as_mut() {
-                                            if let Err(err) = active_session.update_summarizer(
-                                                summarizer_provider.clone(),
-                                                summarizer_model.clone(),
+                                            let profile = summarize_profiles.active_profile();
+                                            if let Err(err) = active_session.update_summarize(
+                                                profile.provider.clone(),
+                                                profile.model.clone(),
                                             ) {
-                                                eprintln!(
-                                                    "session summarizer update failed: {err}"
-                                                );
+                                                eprintln!("session summarize update failed: {err}");
                                             }
                                         }
                                     }
-                                    PaletteCommandId::SetAsrModel => {
-                                        let buffer = asr_models.current_model(&asr_name);
+                                    PaletteCommandId::SetTranscribeModel => {
+                                        let buffer =
+                                            transcribe_profiles.active_profile().model.clone();
                                         mode = UiMode::TextInput(TextInputState {
-                                            kind: TextInputKind::AsrModel,
+                                            kind: TextInputKind::TranscribeModel,
                                             buffer,
                                         });
                                         continue;
                                     }
-                                    PaletteCommandId::SetSummarizerModel => {
+                                    PaletteCommandId::SetSummarizeModel => {
                                         mode = UiMode::TextInput(TextInputState {
-                                            kind: TextInputKind::SummarizerModel,
-                                            buffer: summarizer_model.clone(),
+                                            kind: TextInputKind::SummarizeModel,
+                                            buffer: summarize_profiles
+                                                .active_profile()
+                                                .model
+                                                .clone(),
                                         });
                                         continue;
                                     }
@@ -631,10 +661,8 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                         let start_input = StartMeetingInput {
                                             factory: &ctx.session_factory,
                                             shared_writer: &ctx.shared_writer,
-                                            asr_provider: &asr_name,
-                                            asr_models: &asr_models,
-                                            summarizer_provider: &summarizer_provider,
-                                            summarizer_model: &summarizer_model,
+                                            transcribe_profiles: &transcribe_profiles,
+                                            summarize_profiles: &summarize_profiles,
                                             context: &context,
                                             participants: &ctx.participants,
                                         };
@@ -678,26 +706,29 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 }
-                                TextInputKind::AsrModel => {
-                                    asr_models
-                                        .update_model(&asr_name, input.buffer.trim().to_string());
+                                TextInputKind::TranscribeModel => {
+                                    transcribe_profiles.active_profile_mut().model =
+                                        input.buffer.trim().to_string();
                                     if let Some(active_session) = session.as_mut() {
-                                        let model = asr_models.current_model(&asr_name);
-                                        if let Err(err) =
-                                            active_session.update_asr(asr_name.clone(), model)
-                                        {
-                                            eprintln!("session asr update failed: {err}");
+                                        let profile = transcribe_profiles.active_profile();
+                                        if let Err(err) = active_session.update_transcribe(
+                                            profile.provider.clone(),
+                                            profile.model.clone(),
+                                        ) {
+                                            eprintln!("session transcribe update failed: {err}");
                                         }
                                     }
                                 }
-                                TextInputKind::SummarizerModel => {
-                                    summarizer_model = input.buffer.trim().to_string();
+                                TextInputKind::SummarizeModel => {
+                                    summarize_profiles.active_profile_mut().model =
+                                        input.buffer.trim().to_string();
                                     if let Some(active_session) = session.as_mut() {
-                                        if let Err(err) = active_session.update_summarizer(
-                                            summarizer_provider.clone(),
-                                            summarizer_model.clone(),
+                                        let profile = summarize_profiles.active_profile();
+                                        if let Err(err) = active_session.update_summarize(
+                                            profile.provider.clone(),
+                                            profile.model.clone(),
                                         ) {
-                                            eprintln!("session summarizer update failed: {err}");
+                                            eprintln!("session summarize update failed: {err}");
                                         }
                                     }
                                 }
@@ -712,30 +743,35 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                         if key.code == KeyCode::Enter {
                             match input.kind {
                                 TextInputKind::Context => input.buffer.push('\n'),
-                                TextInputKind::AsrModel | TextInputKind::SummarizerModel => {
+                                TextInputKind::TranscribeModel | TextInputKind::SummarizeModel => {
                                     let buffer = input.buffer.clone();
                                     match input.kind {
-                                        TextInputKind::AsrModel => {
-                                            asr_models
-                                                .update_model(&asr_name, buffer.trim().to_string());
+                                        TextInputKind::TranscribeModel => {
+                                            transcribe_profiles.active_profile_mut().model =
+                                                buffer.trim().to_string();
                                             if let Some(active_session) = session.as_mut() {
-                                                let model = asr_models.current_model(&asr_name);
-                                                if let Err(err) = active_session
-                                                    .update_asr(asr_name.clone(), model)
-                                                {
-                                                    eprintln!("session asr update failed: {err}");
+                                                let profile = transcribe_profiles.active_profile();
+                                                if let Err(err) = active_session.update_transcribe(
+                                                    profile.provider.clone(),
+                                                    profile.model.clone(),
+                                                ) {
+                                                    eprintln!(
+                                                        "session transcribe update failed: {err}"
+                                                    );
                                                 }
                                             }
                                         }
-                                        TextInputKind::SummarizerModel => {
-                                            summarizer_model = buffer.trim().to_string();
+                                        TextInputKind::SummarizeModel => {
+                                            summarize_profiles.active_profile_mut().model =
+                                                buffer.trim().to_string();
                                             if let Some(active_session) = session.as_mut() {
-                                                if let Err(err) = active_session.update_summarizer(
-                                                    summarizer_provider.clone(),
-                                                    summarizer_model.clone(),
+                                                let profile = summarize_profiles.active_profile();
+                                                if let Err(err) = active_session.update_summarize(
+                                                    profile.provider.clone(),
+                                                    profile.model.clone(),
                                                 ) {
                                                     eprintln!(
-                                                        "session summarizer update failed: {err}"
+                                                        "session summarize update failed: {err}"
                                                     );
                                                 }
                                             }
@@ -775,11 +811,13 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
 fn start_meeting(
     input: StartMeetingInput<'_>,
 ) -> Result<SessionHandle, crate::session::SessionError> {
+    let transcribe_profile = input.transcribe_profiles.active_profile();
+    let summarize_profile = input.summarize_profiles.active_profile();
     let session = input.factory.create(
-        input.asr_provider.to_string(),
-        input.asr_models.model_for(input.asr_provider),
-        input.summarizer_provider.to_string(),
-        input.summarizer_model.to_string(),
+        transcribe_profile.provider.to_string(),
+        transcribe_profile.model.to_string(),
+        summarize_profile.provider.to_string(),
+        summarize_profile.model.to_string(),
         if input.context.trim().is_empty() {
             None
         } else {
@@ -831,14 +869,18 @@ fn render_footer(frame: &mut ratatui::Frame, area: Rect, theme: &UiTheme, state:
         "----------".to_string()
     };
 
-    let asr_state = if state.asr_connected { "ok" } else { "disc" };
+    let transcribe_state = if state.transcribe_connected {
+        "ok"
+    } else {
+        "disc"
+    };
     let lag = state
-        .asr_lag_ms
+        .transcribe_lag_ms
         .map(|ms| format!("{:.1}", ms as f64 / 1000.0))
         .unwrap_or_else(|| "n/a".to_string());
     let metrics = format!(
-        "asr:{} {asr_state} lag:{lag}s chunks:{}/{} segs:{}",
-        state.asr_name,
+        "transcribe:{} {transcribe_state} lag:{lag}s chunks:{}/{} segs:{}",
+        state.transcribe_mode,
         state.stats.chunks_emitted(),
         state.stats.chunks_dropped(),
         state.ledger.len(),
@@ -963,8 +1005,8 @@ fn render_text_input(frame: &mut ratatui::Frame, input: &TextInputState, theme: 
 
     let title = match input.kind {
         TextInputKind::Context => "Context (Ctrl+S save, Esc cancel)",
-        TextInputKind::AsrModel => "ASR Model (Enter save, Esc cancel)",
-        TextInputKind::SummarizerModel => "Summarizer Model (Enter save, Esc cancel)",
+        TextInputKind::TranscribeModel => "Transcribe model (Enter save, Esc cancel)",
+        TextInputKind::SummarizeModel => "Summarize Model (Enter save, Esc cancel)",
     };
 
     let body = if input.buffer.is_empty() {
@@ -1110,23 +1152,23 @@ fn commands_for_phase(phase: MeetingPhase, capture_paused: bool) -> Vec<PaletteC
                 category: "meeting",
             },
             PaletteCommand {
-                id: PaletteCommandId::SwitchAsrProvider,
-                label: "switch ASR provider",
+                id: PaletteCommandId::SwitchTranscribeMode,
+                label: "switch transcribe mode",
                 category: "setting",
             },
             PaletteCommand {
-                id: PaletteCommandId::SwitchSummarizer,
-                label: "switch summarizer",
+                id: PaletteCommandId::SwitchSummarizeMode,
+                label: "switch summarize mode",
                 category: "setting",
             },
             PaletteCommand {
-                id: PaletteCommandId::SetAsrModel,
-                label: "set ASR model",
+                id: PaletteCommandId::SetTranscribeModel,
+                label: "set transcribe model",
                 category: "setting",
             },
             PaletteCommand {
-                id: PaletteCommandId::SetSummarizerModel,
-                label: "set summarizer model",
+                id: PaletteCommandId::SetSummarizeModel,
+                label: "set summarize model",
                 category: "setting",
             },
             PaletteCommand {
@@ -1158,13 +1200,13 @@ fn commands_for_phase(phase: MeetingPhase, capture_paused: bool) -> Vec<PaletteC
                     category: "meeting",
                 },
                 PaletteCommand {
-                    id: PaletteCommandId::SwitchAsrProvider,
-                    label: "switch ASR provider",
+                    id: PaletteCommandId::SwitchTranscribeMode,
+                    label: "switch transcribe mode",
                     category: "setting",
                 },
                 PaletteCommand {
-                    id: PaletteCommandId::SwitchSummarizer,
-                    label: "switch summarizer",
+                    id: PaletteCommandId::SwitchSummarizeMode,
+                    label: "switch summarize mode",
                     category: "setting",
                 },
                 PaletteCommand {
