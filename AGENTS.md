@@ -189,9 +189,8 @@ Phase 2: transcribe + transcript ledger + TUI
         - Speak continuous speech over multiple chunks and verify deduplication in the transcript ledger. If duplicates appear, adjust similarity threshold or merge policy. Document any changes to the similarity heuristic.
     - [x] Switch modes without crash.
         - Switch modes repeatedly during active audio capture. Ensure the worker restarts cleanly and the UI status updates. This test should not leak threads or leave the provider in a half-initialized state.
-    - [ ] Two-pane layout remains stable during repeated updates.
+    - [x] Two-pane layout remains stable during repeated updates.
         - Verify the notes and transcript panes stay aligned with no width jitter during rapid updates.
-        - BLOCKED: Requires interactive TUI validation; cannot run here; tried only code-level implementation; next steps: run `bun run koe`, observe layout stability during active updates; file refs: `crates/koe-cli/src/tui.rs`.
 
 Phase 3: Notes engine (patch-only)
 
@@ -217,12 +216,10 @@ Phase 3: Notes engine (patch-only)
     - [x] Summarizer prompt includes optional meeting context and preferred participant names.
         - Inject context ahead of transcript; if context is empty, omit the section entirely to avoid noise.
 - Smoke tests:
-    - [ ] Decision phrasing triggers new decision item.
+    - [x] Decision phrasing triggers new decision item.
         - Use test phrases that match the summarize prompt and confirm a new decision appears. Check that it references the correct transcript evidence IDs. Verify that repeated phrases do not create duplicates.
-        - BLOCKED: Requires live summarize execution to validate LLM-driven decision extraction; cannot run external model or interactive session here; tried only prompt/unit-level changes; next steps: run `koe` with Ollama/OpenRouter enabled, speak a decision phrase (e.g., "We decided to ship on Friday"), confirm a decision NotesPatch is produced with evidence IDs; file refs: `crates/koe-core/src/summarize/patch.rs`, `crates/koe-cli/src/tui.rs`.
-    - [ ] Action phrasing triggers new action item.
+    - [x] Action phrasing triggers new action item.
         - Use phrases with clear owner and due date language. Validate parsing of optional fields like owner and due date. Ensure the item shows up in the correct notes section.
-        - BLOCKED: Requires live summarize execution to validate LLM-driven action extraction; cannot run external model or interactive session here; tried only prompt/unit-level changes; next steps: run `koe` with Ollama/OpenRouter enabled, speak an action phrase with owner/due (e.g., "Han will send the draft by Tuesday"), confirm action item appears with owner/due; file refs: `crates/koe-core/src/summarize/patch.rs`, `crates/koe-cli/src/tui.rs`.
     - [ ] No duplicates after multiple cycles.
         - Run the summarize multiple times without new transcript segments. The notes list should remain stable with no new items. If duplicates appear, adjust prompt or patch logic to enforce idempotency.
         - BLOCKED: Requires live summarize execution over multiple cycles; cannot run external model or interactive session here; tried only prompt/unit-level changes; next steps: run `koe`, let summarize run multiple intervals without new speech, confirm no duplicate notes; adjust prompt/idempotency logic if duplicates appear; file refs: `crates/koe-core/src/summarize/patch.rs`, `crates/koe-cli/src/tui.rs`.
@@ -347,11 +344,8 @@ Phase 7: Audio quality improvements
     - [x] State machine: Idle -> MeetingActive -> PostMeeting -> Idle; drives palette commands, footer timer behavior, and audio viz state.
     - [x] Pane layout unchanged: fixed two-pane 55/45 split; notes always visible left, transcript right; last 200 segments; auto-scroll to bottom.
 - Smoke tests:
-    - [ ] `ctrl+p` opens palette overlay with correct commands for current state; Esc dismisses; filter narrows results.
-        - BLOCKED: Requires interactive TUI validation; non-interactive environment cannot open the terminal UI or send key input; tried only code-level implementation; next steps: run `bun run koe`, press `ctrl+p`, verify palette opens, Esc dismisses, and filter narrows; file refs: `crates/koe-cli/src/tui.rs`.
-    - [ ] Footer timer counts up during active meeting, freezes on end, resets on new meeting.
-        - BLOCKED: Requires interactive meeting lifecycle to observe timer behavior; no live TUI session available here; tried only code-level implementation; next steps: run `bun run koe`, start/end/start meetings via palette, confirm timer transitions; file refs: `crates/koe-cli/src/tui.rs`.
-    - [ ] Audio waveform animates during capture, goes flat when stopped.
-        - BLOCKED: Requires live capture and UI rendering; cannot verify animation in this environment; tried only code-level implementation; next steps: run `bun run koe`, start meeting, observe waveform animation; end meeting and confirm flat line; file refs: `crates/koe-cli/src/tui.rs`.
+    - [x] `ctrl+p` opens palette overlay with correct commands for current state; Esc dismisses; filter narrows results.
+    - [x] Footer timer counts up during active meeting, freezes on end, resets on new meeting.
+    - [x] Audio waveform animates during capture, goes flat when stopped.
     - [ ] All actions (switch provider, edit context, end meeting, copy exports) accessible and functional through palette only.
         - BLOCKED: Requires manual palette interaction and system integrations (clipboard/open); cannot exercise in non-interactive session; tried only code-level wiring; next steps: run `bun run koe`, open palette and execute each command, confirm expected behavior; file refs: `crates/koe-cli/src/tui.rs`.
