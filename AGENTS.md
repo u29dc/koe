@@ -202,7 +202,7 @@ Phase 0: Quality gate wiring
 - Smoke tests:
     - [x] `bun run util:check` completes (not executed).
         - Run this once after any major change to confirm the full gate is healthy. If it fails, address the earliest failing step first to avoid cascading errors. Capture the output in CI logs for later debugging.
-    - [ ] `koe init` writes `~/.koe/config.toml` and can be re-run idempotently without clobbering user edits.
+    - [x] `koe init` writes `~/.koe/config.toml` and can be re-run idempotently without clobbering user edits.
         - Re-running init should preserve existing values unless explicitly changed or `--force` is set; report what changed and what was kept.
 
 Phase 1: Audio capture + chunking
