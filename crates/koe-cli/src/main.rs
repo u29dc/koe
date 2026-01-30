@@ -13,8 +13,8 @@ use koe_core::summarize::create_summarize_provider;
 use koe_core::transcribe::{TranscribeProvider, create_transcribe_provider};
 use koe_core::transcript::TranscriptLedger;
 use koe_core::types::{
-    ActionItem, AudioSource, CaptureStats, MeetingState, NoteItem, NotesOp, NotesPatch,
-    SummarizeEvent,
+    AudioSource, CaptureStats, MeetingNotes, NoteBullet, NotesOp, NotesPatch, SummarizeEvent,
+    TranscriptSegment,
 };
 use raw_audio::{RawAudioMessage, SharedRawAudioWriter, spawn_raw_audio_writer};
 use session::SessionFactory;
@@ -403,15 +403,14 @@ fn main() {
             .name("koe-summarize".into())
             .spawn(move || {
                 const SUMMARIZE_INTERVAL: Duration = Duration::from_secs(10);
-                const SUMMARY_WINDOW_SEGMENTS: usize = 120;
 
                 let mut current_mode = summarize_profiles_runtime.active.clone();
                 let mut context = summarize_context;
                 let participants = summarize_participants;
                 let mut ledger = TranscriptLedger::new();
-                let mut meeting_state = MeetingState::default();
+                let mut meeting_notes = MeetingNotes::default();
                 let mut last_summary_at = Instant::now() - SUMMARIZE_INTERVAL;
-                let mut last_finalized_id: Option<u64> = None;
+                let mut last_summarized_id: u64 = 0;
                 let mut force_summary = false;
 
                 let send_status = |mode: String, provider: String| {
@@ -465,8 +464,8 @@ fn main() {
                             }
                             SummarizeCommand::Reset => {
                                 ledger = TranscriptLedger::new();
-                                meeting_state = MeetingState::default();
-                                last_finalized_id = None;
+                                meeting_notes = MeetingNotes::default();
+                                last_summarized_id = 0;
                                 last_summary_at = Instant::now() - SUMMARIZE_INTERVAL;
                                 force_summary = false;
                             }
@@ -484,15 +483,15 @@ fn main() {
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
 
-                    let newest_finalized = latest_finalized_id(&ledger);
-                    let has_new_finalized = match (last_finalized_id, newest_finalized) {
-                        (Some(last), Some(current)) => current > last,
-                        (None, Some(_)) => true,
-                        _ => false,
-                    };
+                    let new_segments: Vec<TranscriptSegment> = ledger
+                        .segments_since(last_summarized_id)
+                        .iter()
+                        .filter(|seg| seg.finalized)
+                        .cloned()
+                        .collect();
                     let due = Instant::now().duration_since(last_summary_at) >= SUMMARIZE_INTERVAL;
 
-                    if !(force_summary || (has_new_finalized && due)) {
+                    if !(force_summary || (!new_segments.is_empty() && due)) {
                         continue;
                     }
 
@@ -502,9 +501,9 @@ fn main() {
                         continue;
                     };
 
-                    let recent = ledger.last_n_segments(SUMMARY_WINDOW_SEGMENTS);
-                    if !recent.iter().any(|seg| seg.finalized) {
+                    if new_segments.is_empty() {
                         force_summary = false;
+                        last_summary_at = Instant::now();
                         continue;
                     }
 
@@ -516,8 +515,8 @@ fn main() {
                     };
 
                     let result = provider.summarize(
-                        recent,
-                        &meeting_state,
+                        &new_segments,
+                        &meeting_notes,
                         context_ref,
                         &participants,
                         &mut |event| match event {
@@ -532,11 +531,11 @@ fn main() {
                         Ok(()) => {
                             last_summary_at = Instant::now();
                             if let Some(patch) = patch_ready {
-                                apply_notes_patch_state(&mut meeting_state, patch.clone());
+                                apply_notes_patch_state(&mut meeting_notes, patch.clone());
                                 let _ = ui_tx_summarize.send(UiEvent::NotesPatch(patch));
                             }
-                            if newest_finalized.is_some() {
-                                last_finalized_id = newest_finalized;
+                            if let Some(last) = new_segments.last() {
+                                last_summarized_id = last.id;
                             }
                         }
                         Err(e) => {
@@ -846,110 +845,26 @@ fn create_summarize_for_mode(
     )
 }
 
-fn latest_finalized_id(ledger: &TranscriptLedger) -> Option<u64> {
-    ledger
-        .segments()
-        .iter()
-        .filter(|segment| segment.finalized)
-        .map(|segment| segment.id)
-        .max()
-}
-
-fn apply_notes_patch_state(state: &mut MeetingState, patch: NotesPatch) -> bool {
+fn apply_notes_patch_state(notes: &mut MeetingNotes, patch: NotesPatch) -> bool {
     let mut changed = false;
 
     for op in patch.ops {
         match op {
-            NotesOp::AddKeyPoint { id, text, evidence } => {
-                changed |= upsert_note(&mut state.key_points, id, text, evidence);
-            }
-            NotesOp::AddDecision { id, text, evidence } => {
-                changed |= upsert_note(&mut state.decisions, id, text, evidence);
-            }
-            NotesOp::AddAction {
-                id,
-                text,
-                owner,
-                due,
-                evidence,
-            } => {
-                changed |= upsert_action(&mut state.actions, id, text, owner, due, evidence);
-            }
-            NotesOp::UpdateAction { id, owner, due } => {
-                if let Some(item) = state.actions.iter_mut().find(|item| item.id == id) {
-                    let mut updated = false;
-                    if owner != item.owner {
-                        item.owner = owner;
-                        updated = true;
-                    }
-                    if due != item.due {
-                        item.due = due;
-                        updated = true;
-                    }
-                    changed |= updated;
+            NotesOp::Add { id, text, evidence } => {
+                if notes
+                    .bullets
+                    .iter()
+                    .any(|bullet| bullet.id == id || bullet.text == text)
+                {
+                    continue;
                 }
+                notes.bullets.push(NoteBullet { id, text, evidence });
+                changed = true;
             }
         }
     }
 
     changed
-}
-
-fn upsert_note(items: &mut Vec<NoteItem>, id: String, text: String, evidence: Vec<u64>) -> bool {
-    if let Some(item) = items.iter_mut().find(|item| item.id == id) {
-        let mut updated = false;
-        if item.text != text {
-            item.text = text;
-            updated = true;
-        }
-        if item.evidence != evidence {
-            item.evidence = evidence;
-            updated = true;
-        }
-        return updated;
-    }
-
-    items.push(NoteItem { id, text, evidence });
-    true
-}
-
-fn upsert_action(
-    items: &mut Vec<ActionItem>,
-    id: String,
-    text: String,
-    owner: Option<String>,
-    due: Option<String>,
-    evidence: Vec<u64>,
-) -> bool {
-    if let Some(item) = items.iter_mut().find(|item| item.id == id) {
-        let mut updated = false;
-        if item.text != text {
-            item.text = text;
-            updated = true;
-        }
-        if item.owner != owner {
-            item.owner = owner;
-            updated = true;
-        }
-        if item.due != due {
-            item.due = due;
-            updated = true;
-        }
-        if item.evidence != evidence {
-            item.evidence = evidence;
-            updated = true;
-        }
-        return updated;
-    }
-
-    items.push(ActionItem {
-        id,
-        text,
-        owner,
-        due,
-        evidence,
-    });
-    true
 }
 
 #[cfg(test)]

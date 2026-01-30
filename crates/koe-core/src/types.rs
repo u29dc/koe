@@ -37,56 +37,27 @@ pub struct TranscriptSegment {
     pub finalized: bool,
 }
 
-/// Structured meeting notes state.
+/// Rolling meeting notes as a flat bullet stream.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MeetingState {
-    pub key_points: Vec<NoteItem>,
-    pub actions: Vec<ActionItem>,
-    pub decisions: Vec<NoteItem>,
+pub struct MeetingNotes {
+    pub bullets: Vec<NoteBullet>,
 }
 
-/// A single note item (key point or decision).
+/// A single bullet note.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NoteItem {
+pub struct NoteBullet {
     pub id: String,
     pub text: String,
-    pub evidence: Vec<u64>,
-}
-
-/// An action item with optional owner and due date.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActionItem {
-    pub id: String,
-    pub text: String,
-    pub owner: Option<String>,
-    pub due: Option<String>,
     pub evidence: Vec<u64>,
 }
 
 /// A patch operation on the meeting notes state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NotesOp {
-    AddKeyPoint {
+    Add {
         id: String,
         text: String,
         evidence: Vec<u64>,
-    },
-    AddAction {
-        id: String,
-        text: String,
-        owner: Option<String>,
-        due: Option<String>,
-        evidence: Vec<u64>,
-    },
-    AddDecision {
-        id: String,
-        text: String,
-        evidence: Vec<u64>,
-    },
-    UpdateAction {
-        id: String,
-        owner: Option<String>,
-        due: Option<String>,
     },
 }
 

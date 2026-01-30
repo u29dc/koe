@@ -3,7 +3,7 @@ pub mod openrouter;
 mod patch;
 
 use crate::SummarizeError;
-use crate::types::{MeetingState, SummarizeEvent, TranscriptSegment};
+use crate::types::{MeetingNotes, SummarizeEvent, TranscriptSegment};
 
 const DEFAULT_OLLAMA_MODEL: &str = "qwen3:30b-a3b";
 
@@ -12,7 +12,7 @@ pub trait SummarizeProvider: Send {
     fn summarize(
         &mut self,
         recent_segments: &[TranscriptSegment],
-        state: &MeetingState,
+        notes: &MeetingNotes,
         context: Option<&str>,
         participants: &[String],
         on_event: &mut dyn FnMut(SummarizeEvent),

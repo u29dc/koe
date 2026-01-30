@@ -1,10 +1,10 @@
 use crate::SummarizeError;
-use crate::types::{MeetingState, NotesOp, NotesPatch, TranscriptSegment};
+use crate::types::{MeetingNotes, NotesOp, NotesPatch, TranscriptSegment};
 use serde::Deserialize;
 
 pub(crate) fn build_prompt(
     recent: &[TranscriptSegment],
-    state: &MeetingState,
+    _notes: &MeetingNotes,
     context: Option<&str>,
     participants: &[String],
 ) -> String {
@@ -22,7 +22,6 @@ pub(crate) fn build_prompt(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let state_json = serde_json::to_string(state).unwrap_or_else(|_| "{}".to_string());
     let context_block = context
         .filter(|value| !value.is_empty())
         .map(|value| format!("Context:\n{value}\n\n"))
@@ -39,7 +38,7 @@ pub(crate) fn build_prompt(
     };
 
     format!(
-        "You are a meeting notes engine. Return ONLY valid JSON with this schema:\n{{\n  \"ops\": [\n    {{\"op\": \"add_key_point\", \"id\": \"kp_1\", \"text\": \"...\", \"evidence\": [1,2]}}\n  ]\n}}\n\nRules:\n- patch-only: add/update ops only, no deletes\n- stable IDs: reuse IDs when updating\n- evidence is a list of transcript segment IDs\n- if no updates, return {{\"ops\": []}}\n- keep notes minimal and information-dense, no filler or repetition\n- prefer short noun phrases; avoid full sentences when possible\n- each text is <= 120 characters and <= 1 sentence\n- return at most 5 ops per response\n- if a transcript line includes a speaker label, preserve it in note text as \"Me:\" or \"Them:\"\n\n{context_block}{participants_block}Transcript:\n{transcript}\n\nCurrent state JSON:\n{state_json}\n"
+        "You are a concise meeting note-taker. Return ONLY valid JSON with this schema:\n{{\n  \"ops\": [\n    {{\"op\": \"add\", \"id\": \"n_1\", \"text\": \"...\", \"evidence\": [1,2]}}\n  ]\n}}\n\nRules:\n- append-only: only \"add\" ops, no updates or deletes\n- output a rolling list of bullet points, no sections or categories\n- distill 30-60 seconds of conversation into a single statement when possible\n- focus on decisions, commitments, deadlines, and key facts; skip filler or chatter\n- avoid repeating information already captured\n- each text is <= 120 characters and <= 1 sentence\n- return at most 3 ops per response\n- if no meaningful updates, return {{\"ops\": []}}\n- if a transcript line includes a speaker label, preserve it in note text as \"Me:\" or \"Them:\"\n- ids must be unique; use the \"n_\" prefix (examples: n_1, n_2)\n\n{context_block}{participants_block}Transcript (new since last summary):\n{transcript}\n"
     )
 }
 
@@ -72,58 +71,18 @@ impl PatchPayload {
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum PatchOpPayload {
-    AddKeyPoint {
+    Add {
         id: String,
         text: String,
         #[serde(default)]
         evidence: Vec<u64>,
-    },
-    AddAction {
-        id: String,
-        text: String,
-        owner: Option<String>,
-        due: Option<String>,
-        #[serde(default)]
-        evidence: Vec<u64>,
-    },
-    AddDecision {
-        id: String,
-        text: String,
-        #[serde(default)]
-        evidence: Vec<u64>,
-    },
-    UpdateAction {
-        id: String,
-        owner: Option<String>,
-        due: Option<String>,
     },
 }
 
 impl From<PatchOpPayload> for NotesOp {
     fn from(value: PatchOpPayload) -> Self {
         match value {
-            PatchOpPayload::AddKeyPoint { id, text, evidence } => {
-                NotesOp::AddKeyPoint { id, text, evidence }
-            }
-            PatchOpPayload::AddAction {
-                id,
-                text,
-                owner,
-                due,
-                evidence,
-            } => NotesOp::AddAction {
-                id,
-                text,
-                owner,
-                due,
-                evidence,
-            },
-            PatchOpPayload::AddDecision { id, text, evidence } => {
-                NotesOp::AddDecision { id, text, evidence }
-            }
-            PatchOpPayload::UpdateAction { id, owner, due } => {
-                NotesOp::UpdateAction { id, owner, due }
-            }
+            PatchOpPayload::Add { id, text, evidence } => NotesOp::Add { id, text, evidence },
         }
     }
 }
@@ -140,7 +99,7 @@ fn extract_json_object(input: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::{build_prompt, extract_json_object, parse_patch};
-    use crate::types::{MeetingState, TranscriptSegment};
+    use crate::types::{MeetingNotes, TranscriptSegment};
 
     fn seg(id: u64, text: &str) -> TranscriptSegment {
         TranscriptSegment {
@@ -168,7 +127,7 @@ mod tests {
 
     #[test]
     fn parse_patch_payload() {
-        let output = r#"{"ops":[{"op":"add_key_point","id":"k1","text":"hello","evidence":[1]}]}"#;
+        let output = r#"{"ops":[{"op":"add","id":"n1","text":"hello","evidence":[1]}]}"#;
         let patch = parse_patch(output).unwrap();
         assert_eq!(patch.ops.len(), 1);
     }
@@ -182,15 +141,15 @@ mod tests {
 
     #[test]
     fn build_prompt_includes_transcript() {
-        let prompt = build_prompt(&[seg(1, "hello")], &MeetingState::default(), None, &[]);
-        assert!(prompt.contains("Transcript:"));
+        let prompt = build_prompt(&[seg(1, "hello")], &MeetingNotes::default(), None, &[]);
+        assert!(prompt.contains("Transcript (new since last summary):"));
     }
 
     #[test]
     fn build_prompt_includes_context() {
         let prompt = build_prompt(
             &[seg(1, "hello")],
-            &MeetingState::default(),
+            &MeetingNotes::default(),
             Some("team sync"),
             &[],
         );
@@ -202,7 +161,7 @@ mod tests {
     fn build_prompt_uses_finalized_only() {
         let prompt = build_prompt(
             &[seg(1, "keep"), seg_unfinalized(2, "drop")],
-            &MeetingState::default(),
+            &MeetingNotes::default(),
             None,
             &[],
         );
@@ -212,17 +171,17 @@ mod tests {
 
     #[test]
     fn build_prompt_is_information_dense() {
-        let prompt = build_prompt(&[seg(1, "alpha")], &MeetingState::default(), None, &[]);
-        assert!(prompt.contains("information-dense"));
+        let prompt = build_prompt(&[seg(1, "alpha")], &MeetingNotes::default(), None, &[]);
+        assert!(prompt.contains("rolling list"));
         assert!(prompt.contains("<= 120"));
-        assert!(prompt.contains("at most 5 ops"));
+        assert!(prompt.contains("at most 3 ops"));
     }
 
     #[test]
     fn build_prompt_includes_speaker_labels() {
         let mut with_speaker = seg(1, "hello");
         with_speaker.speaker = Some("Me".to_string());
-        let prompt = build_prompt(&[with_speaker], &MeetingState::default(), None, &[]);
+        let prompt = build_prompt(&[with_speaker], &MeetingNotes::default(), None, &[]);
         assert!(prompt.contains("Me: hello"));
     }
 
@@ -231,7 +190,7 @@ mod tests {
         let participants = vec!["Han".to_string(), "Sarah".to_string()];
         let prompt = build_prompt(
             &[seg(1, "hello")],
-            &MeetingState::default(),
+            &MeetingNotes::default(),
             None,
             &participants,
         );

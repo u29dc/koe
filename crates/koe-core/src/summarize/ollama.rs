@@ -1,6 +1,6 @@
 use crate::SummarizeError;
 use crate::http::{default_agent, retry_delay, should_retry};
-use crate::types::{MeetingState, SummarizeEvent, TranscriptSegment};
+use crate::types::{MeetingNotes, SummarizeEvent, TranscriptSegment};
 use serde::Deserialize;
 use serde_json::json;
 use std::thread;
@@ -35,12 +35,12 @@ impl SummarizeProvider for OllamaProvider {
     fn summarize(
         &mut self,
         recent_segments: &[TranscriptSegment],
-        state: &MeetingState,
+        _notes: &MeetingNotes,
         context: Option<&str>,
         participants: &[String],
         on_event: &mut dyn FnMut(SummarizeEvent),
     ) -> Result<(), SummarizeError> {
-        let prompt = patch::build_prompt(recent_segments, state, context, participants);
+        let prompt = patch::build_prompt(recent_segments, _notes, context, participants);
         let url = format!("{}/api/generate", self.base_url);
         let mut last_error: Option<ureq::Error> = None;
         let mut raw_body: Option<String> = None;

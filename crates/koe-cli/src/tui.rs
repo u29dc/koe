@@ -6,7 +6,7 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use koe_core::process::AudioProcessor;
 use koe_core::transcript::TranscriptLedger;
 use koe_core::types::{
-    ActionItem, CaptureStats, MeetingState, NoteItem, NotesOp, NotesPatch, TranscriptSegment,
+    CaptureStats, MeetingNotes, NoteBullet, NotesOp, NotesPatch, TranscriptSegment,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -292,9 +292,9 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
     let mut processor = ctx.processor;
     let theme = UiTheme::from_config(&ctx.ui_config);
     let mut ledger = TranscriptLedger::new();
-    let mut meeting_state = MeetingState::default();
+    let mut meeting_notes = MeetingNotes::default();
     let mut transcript_lines = render_transcript_lines(&ledger, &theme);
-    let mut notes_lines = render_notes_lines(&meeting_state, &theme);
+    let mut notes_lines = render_notes_lines(&meeting_notes, &theme);
     let mut transcribe_connected = true;
     let mut transcribe_lag_ms: Option<u128> = None;
     let mut phase = MeetingPhase::Idle;
@@ -317,7 +317,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
             capture_paused,
             session: &mut session,
             ledger: &mut ledger,
-            meeting_state: &mut meeting_state,
+            meeting_notes: &mut meeting_notes,
             transcript_lines: &mut transcript_lines,
             notes_lines: &mut notes_lines,
             transcribe_profiles: &mut transcribe_profiles,
@@ -444,10 +444,10 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                     if let Ok(new_session) = start_meeting(start_input) {
                                         session = Some(new_session);
                                         session_finalized = false;
-                                        meeting_state = MeetingState::default();
+                                        meeting_notes = MeetingNotes::default();
                                         ledger = TranscriptLedger::new();
                                         transcript_lines = render_transcript_lines(&ledger, &theme);
-                                        notes_lines = render_notes_lines(&meeting_state, &theme);
+                                        notes_lines = render_notes_lines(&meeting_notes, &theme);
                                         meeting_started_at = Some(Instant::now());
                                         meeting_elapsed = Duration::ZERO;
                                         phase = MeetingPhase::MeetingActive;
@@ -466,7 +466,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                         capture_paused,
                                         session: &mut session,
                                         ledger: &mut ledger,
-                                        meeting_state: &mut meeting_state,
+                                        meeting_notes: &mut meeting_notes,
                                         transcript_lines: &mut transcript_lines,
                                         notes_lines: &mut notes_lines,
                                         transcribe_profiles: &mut transcribe_profiles,
@@ -487,7 +487,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                     ctx.shared_writer.set(None);
                                     if let Some(active_session) = session.as_mut() {
                                         let segments = ledger.segments().to_vec();
-                                        let state_snapshot = meeting_state.clone();
+                                        let state_snapshot = meeting_notes.clone();
                                         if let Err(err) = export_session_with_timeout(
                                             active_session.clone(),
                                             segments,
@@ -587,7 +587,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                             eprintln!("export transcript failed: {err}");
                                         }
                                         if let Err(err) =
-                                            active_session.export_notes_markdown(&meeting_state)
+                                            active_session.export_notes_markdown(&meeting_notes)
                                         {
                                             eprintln!("export notes failed: {err}");
                                         }
@@ -604,7 +604,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                             capture_paused,
                                             session: &mut session,
                                             ledger: &mut ledger,
-                                            meeting_state: &mut meeting_state,
+                                            meeting_notes: &mut meeting_notes,
                                             transcript_lines: &mut transcript_lines,
                                             notes_lines: &mut notes_lines,
                                             transcribe_profiles: &mut transcribe_profiles,
@@ -629,7 +629,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                         && !session_finalized
                                     {
                                         let segments = ledger.segments().to_vec();
-                                        let state_snapshot = meeting_state.clone();
+                                        let state_snapshot = meeting_notes.clone();
                                         let _ = export_session_with_timeout(
                                             active_session.clone(),
                                             segments,
@@ -639,10 +639,10 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     session = None;
                                     session_finalized = false;
-                                    meeting_state = MeetingState::default();
+                                    meeting_notes = MeetingNotes::default();
                                     ledger = TranscriptLedger::new();
                                     transcript_lines = render_transcript_lines(&ledger, &theme);
-                                    notes_lines = render_notes_lines(&meeting_state, &theme);
+                                    notes_lines = render_notes_lines(&meeting_notes, &theme);
                                     meeting_started_at = None;
                                     meeting_elapsed = Duration::ZERO;
                                     phase = MeetingPhase::Idle;
@@ -661,10 +661,10 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                     if let Ok(new_session) = start_meeting(start_input) {
                                         session = Some(new_session);
                                         session_finalized = false;
-                                        meeting_state = MeetingState::default();
+                                        meeting_notes = MeetingNotes::default();
                                         ledger = TranscriptLedger::new();
                                         transcript_lines = render_transcript_lines(&ledger, &theme);
-                                        notes_lines = render_notes_lines(&meeting_state, &theme);
+                                        notes_lines = render_notes_lines(&meeting_notes, &theme);
                                         meeting_started_at = Some(Instant::now());
                                         meeting_elapsed = Duration::ZERO;
                                         phase = MeetingPhase::MeetingActive;
@@ -792,7 +792,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                 capture_paused,
                 session: &mut session,
                 ledger: &mut ledger,
-                meeting_state: &mut meeting_state,
+                meeting_notes: &mut meeting_notes,
                 transcript_lines: &mut transcript_lines,
                 notes_lines: &mut notes_lines,
                 transcribe_profiles: &mut transcribe_profiles,
@@ -820,8 +820,8 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
         && !session_finalized
     {
         let segments = ledger.segments().to_vec();
-        let state_snapshot = meeting_state.clone();
-        let _ = export_session_with_timeout(active_session.clone(), segments, state_snapshot);
+        let notes_snapshot = meeting_notes.clone();
+        let _ = export_session_with_timeout(active_session.clone(), segments, notes_snapshot);
         let _ = active_session.finalize();
     }
 
@@ -835,7 +835,7 @@ struct UiEventState<'a> {
     capture_paused: bool,
     session: &'a mut Option<SessionHandle>,
     ledger: &'a mut TranscriptLedger,
-    meeting_state: &'a mut MeetingState,
+    meeting_notes: &'a mut MeetingNotes,
     transcript_lines: &'a mut Vec<Line<'static>>,
     notes_lines: &'a mut Vec<Line<'static>>,
     transcribe_profiles: &'a mut ModeProfiles,
@@ -863,13 +863,13 @@ impl<'a> UiEventState<'a> {
                 }
             }
             UiEvent::NotesPatch(patch) => {
-                if accept_updates && apply_notes_patch(self.meeting_state, patch) {
+                if accept_updates && apply_notes_patch(self.meeting_notes, patch) {
                     if let Some(active_session) = self.session.as_mut()
-                        && let Err(err) = active_session.write_notes(self.meeting_state)
+                        && let Err(err) = active_session.write_notes(self.meeting_notes)
                     {
                         eprintln!("session notes write failed: {err}");
                     }
-                    *self.notes_lines = render_notes_lines(self.meeting_state, self.theme);
+                    *self.notes_lines = render_notes_lines(self.meeting_notes, self.theme);
                 }
             }
             UiEvent::TranscribeStatus {
@@ -1242,14 +1242,14 @@ fn render_transcript_lines(ledger: &TranscriptLedger, theme: &UiTheme) -> Vec<Li
     lines
 }
 
-fn render_notes_lines(state: &MeetingState, theme: &UiTheme) -> Vec<Line<'static>> {
+fn render_notes_lines(notes: &MeetingNotes, theme: &UiTheme) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled(
         "Notes",
         Style::default().fg(theme.heading),
     )));
 
-    if state.key_points.is_empty() && state.actions.is_empty() && state.decisions.is_empty() {
+    if notes.bullets.is_empty() {
         lines.push(Line::from(Span::styled(
             "waiting for notes...",
             Style::default().fg(theme.muted),
@@ -1257,31 +1257,8 @@ fn render_notes_lines(state: &MeetingState, theme: &UiTheme) -> Vec<Line<'static
         return lines;
     }
 
-    for item in &state.key_points {
-        lines.push(note_line(item.text.clone(), theme));
-    }
-
-    for item in &state.actions {
-        let mut text = item.text.clone();
-        if item.owner.is_some() || item.due.is_some() {
-            let owner = item.owner.clone().unwrap_or_default();
-            let due = item.due.clone().unwrap_or_default();
-            text.push_str(" — ");
-            if !owner.is_empty() {
-                text.push_str(owner.as_str());
-            }
-            if !due.is_empty() {
-                if !owner.is_empty() {
-                    text.push_str(", ");
-                }
-                text.push_str(due.as_str());
-            }
-        }
-        lines.push(note_line(text, theme));
-    }
-
-    for item in &state.decisions {
-        lines.push(note_line(item.text.clone(), theme));
+    for bullet in &notes.bullets {
+        lines.push(note_line(bullet.text.clone(), theme));
     }
 
     lines
@@ -1488,11 +1465,11 @@ fn format_duration(duration: Duration) -> String {
 fn export_session_with_timeout(
     mut session: SessionHandle,
     segments: Vec<TranscriptSegment>,
-    state: MeetingState,
+    notes: MeetingNotes,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (tx, rx) = channel();
     thread::spawn(move || {
-        let result = session.export_on_exit(&segments, &state);
+        let result = session.export_on_exit(&segments, &notes);
         let _ = tx.send(result);
     });
 
@@ -1506,101 +1483,26 @@ fn export_session_with_timeout(
     }
 }
 
-fn apply_notes_patch(state: &mut MeetingState, patch: NotesPatch) -> bool {
+fn apply_notes_patch(notes: &mut MeetingNotes, patch: NotesPatch) -> bool {
     let mut changed = false;
 
     for op in patch.ops {
         match op {
-            NotesOp::AddKeyPoint { id, text, evidence } => {
-                changed |= upsert_note(&mut state.key_points, id, text, evidence);
-            }
-            NotesOp::AddDecision { id, text, evidence } => {
-                changed |= upsert_note(&mut state.decisions, id, text, evidence);
-            }
-            NotesOp::AddAction {
-                id,
-                text,
-                owner,
-                due,
-                evidence,
-            } => {
-                changed |= upsert_action(&mut state.actions, id, text, owner, due, evidence);
-            }
-            NotesOp::UpdateAction { id, owner, due } => {
-                if let Some(item) = state.actions.iter_mut().find(|item| item.id == id) {
-                    let mut updated = false;
-                    if owner != item.owner {
-                        item.owner = owner;
-                        updated = true;
-                    }
-                    if due != item.due {
-                        item.due = due;
-                        updated = true;
-                    }
-                    changed |= updated;
+            NotesOp::Add { id, text, evidence } => {
+                if notes
+                    .bullets
+                    .iter()
+                    .any(|bullet| bullet.id == id || bullet.text == text)
+                {
+                    continue;
                 }
+                notes.bullets.push(NoteBullet { id, text, evidence });
+                changed = true;
             }
         }
     }
 
     changed
-}
-
-fn upsert_note(items: &mut Vec<NoteItem>, id: String, text: String, evidence: Vec<u64>) -> bool {
-    if let Some(item) = items.iter_mut().find(|item| item.id == id) {
-        let mut updated = false;
-        if item.text != text {
-            item.text = text;
-            updated = true;
-        }
-        if item.evidence != evidence {
-            item.evidence = evidence;
-            updated = true;
-        }
-        return updated;
-    }
-
-    items.push(NoteItem { id, text, evidence });
-    true
-}
-
-fn upsert_action(
-    items: &mut Vec<ActionItem>,
-    id: String,
-    text: String,
-    owner: Option<String>,
-    due: Option<String>,
-    evidence: Vec<u64>,
-) -> bool {
-    if let Some(item) = items.iter_mut().find(|item| item.id == id) {
-        let mut updated = false;
-        if item.text != text {
-            item.text = text;
-            updated = true;
-        }
-        if item.owner != owner {
-            item.owner = owner;
-            updated = true;
-        }
-        if item.due != due {
-            item.due = due;
-            updated = true;
-        }
-        if item.evidence != evidence {
-            item.evidence = evidence;
-            updated = true;
-        }
-        return updated;
-    }
-
-    items.push(ActionItem {
-        id,
-        text,
-        owner,
-        due,
-        evidence,
-    });
-    true
 }
 
 fn note_line(text: String, theme: &UiTheme) -> Line<'static> {
@@ -1685,58 +1587,51 @@ fn open_path(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::apply_notes_patch;
-    use koe_core::types::{MeetingState, NotesOp, NotesPatch};
+    use koe_core::types::{MeetingNotes, NotesOp, NotesPatch};
 
     #[test]
-    fn apply_notes_patch_upserts_key_point() {
-        let mut state = MeetingState::default();
+    fn apply_notes_patch_appends_bullets() {
+        let mut notes = MeetingNotes::default();
         let patch = NotesPatch {
-            ops: vec![NotesOp::AddKeyPoint {
-                id: "k1".to_string(),
+            ops: vec![NotesOp::Add {
+                id: "n1".to_string(),
                 text: "first".to_string(),
                 evidence: vec![1],
             }],
         };
 
-        assert!(apply_notes_patch(&mut state, patch));
-        assert_eq!(state.key_points.len(), 1);
-        assert_eq!(state.key_points[0].text, "first");
-
-        let patch = NotesPatch {
-            ops: vec![NotesOp::AddKeyPoint {
-                id: "k1".to_string(),
-                text: "updated".to_string(),
-                evidence: vec![1, 2],
-            }],
-        };
-        assert!(apply_notes_patch(&mut state, patch));
-        assert_eq!(state.key_points.len(), 1);
-        assert_eq!(state.key_points[0].text, "updated");
-        assert_eq!(state.key_points[0].evidence, vec![1, 2]);
+        assert!(apply_notes_patch(&mut notes, patch));
+        assert_eq!(notes.bullets.len(), 1);
+        assert_eq!(notes.bullets[0].text, "first");
     }
 
     #[test]
-    fn apply_notes_patch_updates_action_owner() {
-        let mut state = MeetingState::default();
+    fn apply_notes_patch_dedupes_by_id_or_text() {
+        let mut notes = MeetingNotes::default();
         let patch = NotesPatch {
-            ops: vec![NotesOp::AddAction {
-                id: "a1".to_string(),
-                text: "do it".to_string(),
-                owner: None,
-                due: None,
-                evidence: vec![3],
+            ops: vec![NotesOp::Add {
+                id: "n1".to_string(),
+                text: "first".to_string(),
+                evidence: vec![1],
             }],
         };
-        assert!(apply_notes_patch(&mut state, patch));
+        assert!(apply_notes_patch(&mut notes, patch));
+
         let patch = NotesPatch {
-            ops: vec![NotesOp::UpdateAction {
-                id: "a1".to_string(),
-                owner: Some("Han".to_string()),
-                due: Some("tomorrow".to_string()),
-            }],
+            ops: vec![
+                NotesOp::Add {
+                    id: "n1".to_string(),
+                    text: "duplicate-id".to_string(),
+                    evidence: vec![2],
+                },
+                NotesOp::Add {
+                    id: "n2".to_string(),
+                    text: "first".to_string(),
+                    evidence: vec![3],
+                },
+            ],
         };
-        assert!(apply_notes_patch(&mut state, patch));
-        assert_eq!(state.actions[0].owner.as_deref(), Some("Han"));
-        assert_eq!(state.actions[0].due.as_deref(), Some("tomorrow"));
+        assert!(!apply_notes_patch(&mut notes, patch));
+        assert_eq!(notes.bullets.len(), 1);
     }
 }

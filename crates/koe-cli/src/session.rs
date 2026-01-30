@@ -1,5 +1,5 @@
 use crate::config::ConfigPaths;
-use koe_core::types::{MeetingState, TranscriptSegment};
+use koe_core::types::{MeetingNotes, TranscriptSegment};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io;
@@ -193,7 +193,7 @@ impl SessionHandle {
         set_strict_permissions(&transcript_path)?;
         let notes_snapshot = NotesSnapshot {
             updated_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
-            state: MeetingState::default(),
+            state: MeetingNotes::default(),
         };
         let notes_payload = serde_json::to_string_pretty(&notes_snapshot)?;
         write_atomic(&notes_path, notes_payload.as_bytes())?;
@@ -277,7 +277,7 @@ impl SessionHandle {
         Ok(())
     }
 
-    pub fn write_notes(&mut self, state: &MeetingState) -> Result<(), SessionError> {
+    pub fn write_notes(&mut self, state: &MeetingNotes) -> Result<(), SessionError> {
         let snapshot = NotesSnapshot {
             updated_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
             state: state.clone(),
@@ -330,45 +330,15 @@ impl SessionHandle {
         )
     }
 
-    pub fn export_notes_markdown(&self, state: &MeetingState) -> Result<(), SessionError> {
+    pub fn export_notes_markdown(&self, state: &MeetingNotes) -> Result<(), SessionError> {
         let export_root = self.export_root()?;
         let path = export_root.join("notes.md");
         let mut output = String::from("# Notes\n\n");
 
-        output.push_str("## Key points\n");
-        if state.key_points.is_empty() {
+        if state.bullets.is_empty() {
             output.push_str("- (none)\n");
         } else {
-            for item in &state.key_points {
-                output.push_str(&format!("- {}\n", item.text.trim()));
-            }
-        }
-
-        output.push_str("\n## Actions\n");
-        if state.actions.is_empty() {
-            output.push_str("- (none)\n");
-        } else {
-            for item in &state.actions {
-                let mut suffix = Vec::new();
-                if let Some(owner) = item.owner.as_deref() {
-                    suffix.push(format!("owner: {owner}"));
-                }
-                if let Some(due) = item.due.as_deref() {
-                    suffix.push(format!("due: {due}"));
-                }
-                if suffix.is_empty() {
-                    output.push_str(&format!("- {}\n", item.text.trim()));
-                } else {
-                    output.push_str(&format!("- {} ({})\n", item.text.trim(), suffix.join(", ")));
-                }
-            }
-        }
-
-        output.push_str("\n## Decisions\n");
-        if state.decisions.is_empty() {
-            output.push_str("- (none)\n");
-        } else {
-            for item in &state.decisions {
+            for item in &state.bullets {
                 output.push_str(&format!("- {}\n", item.text.trim()));
             }
         }
@@ -380,7 +350,7 @@ impl SessionHandle {
     pub fn export_on_exit(
         &mut self,
         segments: &[TranscriptSegment],
-        state: &MeetingState,
+        state: &MeetingNotes,
     ) -> Result<(), SessionError> {
         self.write_notes(state)?;
         self.export_audio_wav()?;
@@ -459,7 +429,7 @@ impl TranscriptRecord {
 #[derive(Serialize)]
 struct NotesSnapshot {
     updated_at: String,
-    state: MeetingState,
+    state: MeetingNotes,
 }
 
 fn write_metadata(path: &Path, metadata: &SessionMetadata) -> Result<(), SessionError> {
@@ -585,7 +555,7 @@ fn format_timestamp(ms: i64) -> String {
 mod tests {
     use super::{SessionHandle, SessionMetadata, SessionMetadataInput};
     use crate::config::ConfigPaths;
-    use koe_core::types::{MeetingState, NoteItem, TranscriptSegment};
+    use koe_core::types::{MeetingNotes, TranscriptSegment};
     use tempfile::tempdir;
 
     #[test]
@@ -618,9 +588,9 @@ mod tests {
             text: "hello".to_string(),
             finalized: true,
         }];
-        let mut state = MeetingState::default();
-        state.key_points.push(NoteItem {
-            id: "k1".to_string(),
+        let mut state = MeetingNotes::default();
+        state.bullets.push(koe_core::types::NoteBullet {
+            id: "n1".to_string(),
             text: "first point".to_string(),
             evidence: vec![1],
         });
