@@ -1,0 +1,36 @@
+lint-staged.config.js
+  9c7196d544149fff 1-3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.40",
+  "base_commit_sha": "79eb27199618744620f7d3f0bec7207548c635c4",
+  "prompts": {
+    "48585a39097dc649": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "466f9d6a-3552-45fe-a74b-d2145175289d",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 1,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "9c7196d544149fff": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6cd2b282-8ea7-4a4c-aa29-306042a3ab33",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 3,
+      "total_deletions": 3,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    }
+  }
+}
