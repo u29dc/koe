@@ -57,92 +57,13 @@ ScreenCaptureKit (system audio + mic)
               -> TUI (transcript + notes + status)
 ```
 
-Component responsibilities: ScreenCaptureKit adapter (enumerate content, configure stream, deliver audio buffers), RT callback (copy samples into ring buffer and return immediately), audio processor (timestamp alignment, optional mix, resample to 16 kHz mono), VAD + chunker (detect speech, emit bounded overlapped chunks), transcribe provider (transcribe chunks into timestamped segments), transcript ledger (merge overlaps, keep last N seconds mutable, finalize older segments), notes engine (produce patch ops, apply to stable meeting state), TUI (render transcript/notes, show lag/drops/provider status, handle hotkeys).
-
-Threading model: ScreenCaptureKit dispatch queue -> SPSC ring buffer (`rtrb::RingBuffer<f32>`) per stream; audio processor thread drains ring buffers and emits chunks; chunk queue via `std::sync::mpsc::sync_channel<AudioChunk>` (cap 4, drop-oldest); transcribe worker thread reads chunks and outputs segments on `std::sync::mpsc::channel<TranscriptEvent>`; notes thread ticks on interval/trigger and outputs `NotesPatch` on `std::sync::mpsc::channel<NotesPatch>`; UI thread (ratatui) consumes events from a single merged channel.
-
-Event/command surface: `CoreEvent` (transcript updates, finalized segment IDs, notes patches, provider status, stats, errors), `CoreCommand` (start/stop, mode switch, force summarize, export, pause/resume); transport is in-process channels for koe-cli, NDJSON over stdout or Unix socket for future Swift UI.
+Responsibilities: ScreenCaptureKit adapter (enumerate/configure/stream), RT callback (copy into ring buffer, return), audio processor (PTS align, mix, resample 48k→16k), VAD+chunker, transcribe provider, transcript ledger (overlap merge + finalize window), notes engine (patch ops), TUI (render + status + hotkeys). Threading: ScreenCaptureKit queue → SPSC ring buffers; processor drains → chunk queue (sync_channel cap 4, drop-oldest); transcribe worker emits segments; notes thread emits patches; UI consumes merged events. Event/command surface: `CoreEvent` (transcript/notes/status/stats/errors) and `CoreCommand` (start/stop/mode/force/export/pause), transported via in-process channels; NDJSON over stdout/Unix socket reserved for future Swift UI.
 
 ## 4. Technical Decisions
 
-Platform: macOS 15+ only, latest ScreenCaptureKit APIs, no legacy fallback paths; permissions require Screen Recording (system audio) and Microphone, both typically need process restart after grant.
+macOS 15+ only (ScreenCaptureKit, no legacy fallback; Screen Recording + Microphone permissions, restart often required); audio capture via ScreenCaptureKit with `captures_audio=true`, audio-only output with tiny-video fallback for callbacks, mic via ScreenCaptureKit (no cpal); VAD/chunking: Silero 512-sample frames @16 kHz (32 ms), threshold 0.5, min speech 200 ms, hangover 300 ms, chunks target 4.0 s with 1.0 s overlap (min 2.0 s, max 6.0 s); backpressure: 10 s ring per stream, chunk queue cap 4 drop-oldest, notes queue cap 1 skip-if-busy; notes: append-only bullets with stable IDs, summarize finalized segments only, cadence every 10 s or on keyword triggers; speaker labels: mic → “Me”, system → “Them”, mixed → “Unknown”.
 
-Audio capture: ScreenCaptureKit with content filter `captures_audio=true`, default audio-only output, fallback flag for tiny video output if needed for callbacks; microphone via ScreenCaptureKit only (macOS 15+), no cpal.
-
-Chunking/VAD: Silero VAD frame size 512 samples at 16 kHz (32 ms), threshold 0.5, min speech 200 ms, hangover 300 ms; chunking target 4.0 s windows, 1.0 s overlap, min 2.0 s, max 6.0 s.
-
-Backpressure: ring buffer 10 s per stream, chunk queue cap 4 drop-oldest, notes queue cap 1 skip-if-busy; favors freshness and UI responsiveness.
-
-Notes stability: patch-based updates with stable IDs (add/update ops only), summarize uses finalized segments only, tentative notes marked when referencing mutable evidence, update cadence every 10 s or on keyword triggers (decision/action phrases).
-
-Speaker labeling: stream-based attribution (mic -> "Me", system -> "Them"), mixed stream labeled "Unknown"; most reliable low-latency option without diarization overhead.
-
-## 5. Interfaces
-
-```rust
-pub struct AudioFrame {
-    pub pts_ns: i128,
-    pub sample_rate_hz: u32,
-    pub channels: u16,
-    pub samples_f32: Vec<f32>,
-}
-
-pub enum AudioSource { System, Microphone, Mixed }
-
-pub struct AudioChunk {
-    pub source: AudioSource,
-    pub start_pts_ns: i128,
-    pub sample_rate_hz: u32, // 16_000
-    pub pcm_mono_f32: Vec<f32>,
-}
-
-pub struct TranscriptSegment {
-    pub id: u64,
-    pub start_ms: i64,
-    pub end_ms: i64,
-    pub speaker: Option<String>,
-    pub text: String,
-    pub finalized: bool,
-}
-
-pub struct MeetingState {
-    pub key_points: Vec<NoteItem>,
-    pub actions: Vec<ActionItem>,
-    pub decisions: Vec<NoteItem>,
-}
-
-pub struct NoteItem { pub id: String, pub text: String, pub evidence: Vec<u64> }
-pub struct ActionItem { pub id: String, pub text: String, pub owner: Option<String>, pub due: Option<String>, pub evidence: Vec<u64> }
-
-pub enum NotesOp {
-    AddKeyPoint { id: String, text: String, evidence: Vec<u64> },
-    AddAction { id: String, text: String, owner: Option<String>, due: Option<String>, evidence: Vec<u64> },
-    AddDecision { id: String, text: String, evidence: Vec<u64> },
-    UpdateAction { id: String, owner: Option<String>, due: Option<String> },
-}
-
-pub struct NotesPatch { pub ops: Vec<NotesOp> }
-pub enum SummarizeEvent { DraftToken(String), PatchReady(NotesPatch) }
-
-pub trait AudioCapture: Send {
-    fn start(&mut self) -> Result<(), CaptureError>;
-    fn stop(&mut self);
-    fn try_recv_system(&mut self) -> Option<AudioFrame>;
-    fn try_recv_mic(&mut self) -> Option<AudioFrame>;
-}
-
-pub trait TranscribeProvider: Send {
-    fn name(&self) -> &'static str;
-    fn transcribe(&mut self, chunk: &AudioChunk) -> Result<Vec<TranscriptSegment>, TranscribeError>;
-}
-
-pub trait SummarizeProvider: Send {
-    fn name(&self) -> &'static str;
-    fn summarize(&mut self, recent_segments: &[TranscriptSegment], state: &MeetingState, on_event: &mut dyn FnMut(SummarizeEvent)) -> Result<(), SummarizeError>;
-}
-```
-
-## 6. Commands
+## 5. Commands
 
 | Command                 | Description                                                          |
 | ----------------------- | -------------------------------------------------------------------- |
@@ -153,7 +74,7 @@ pub trait SummarizeProvider: Send {
 | `bun run util:test`     | `cargo test --all`                                                   |
 | `bun run util:check`    | runs format + lint + test sequentially, exits nonzero on any failure |
 
-## 7. Local Setup and Testing
+## 6. Local Setup and Testing
 
 - Run `bun run koe -- init` to download a Whisper model and write `~/.koe/config.toml` (interactive onboarding for transcribe/summarize provider, model, and API keys).
 - Alternate model: `bun run koe -- init --model small`.
@@ -161,50 +82,29 @@ pub trait SummarizeProvider: Send {
 - Run cloud transcribe: `bun run koe -- --transcribe cloud`.
 - Environment variables (`KOE_TRANSCRIBE_CLOUD_API_KEY`, `KOE_SUMMARIZE_CLOUD_API_KEY`) are optional overrides; `~/.koe/config.toml` is canonical.
 
-## 8. Quality
+## 7. Quality
 
 Zero clippy warnings (`-D warnings`), `cargo fmt --all` enforced, all tests passing, pre-commit hooks run full `util:check` via lint-staged, commitlint enforces conventional commits with domain scopes (core, cli, web, config, deps).
 
 Testing strategy: unit tests for VAD state machine and chunk boundary logic, transcript ledger overlap merge and finalize logic, NotesPatch apply and stable ID handling; integration tests feed canned WAV chunks through chunker -> transcribe mock -> ledger and summarize mock returns patch with state application; manual QA for permissions prompts, restart behavior, capture correctness, and 30-min long-running session stability.
 
-## 9. Roadmap
+## 8. Roadmap
 
 Phase 0: Quality gate wiring
 
 - Done criteria:
-    - [x] `util:format`, `util:lint`, `util:test`, and `util:check` scripts are configured (`package.json`).
-        - Keep the scripts in this order so a failed format step does not mask lint or test failures. When you add new checks (e.g., `cargo audit`), extend `util:check` rather than introducing new top-level scripts. The goal is one command that runs all gates locally and in CI, so changes should be mirrored in CI configuration when added.
-    - [x] Husky hooks configured for pre-commit + commit-msg (`.husky/pre-commit`, `.husky/commit-msg`).
-        - Ensure hooks stay minimal and only call existing scripts, so failures are consistent in CI and local dev. If you add more hooks later, prefer small wrappers that call `bun run util:check` or commitlint rather than custom logic. Verify file execute permissions are preserved after edits.
-    - [x] lint-staged configured to run `bun run util:check` (`lint-staged.config.js`).
-        - This should remain a full gate, not a partial staged-file lint, to avoid hidden failures. If you later decide to optimize, add a separate `util:check:fast` but keep `util:check` as the authoritative full run. Ensure any new file types are still covered by the full gate.
-    - [x] commitlint configuration present (`commitlint.config.js`).
-        - Keep scopes aligned with repo domains; if you add new crates or packages, update the `scope-enum`. Commitlint should stay strict to enforce consistent history. When upgrading commitlint, confirm rule names still match.
-    - [x] rustfmt configuration present (`rustfmt.toml`).
-        - Maintain formatting rules here rather than inline editor settings so that `cargo fmt` is deterministic. If style changes are needed, document them in the plan or a style note. Ensure formatting does not fight the default Rust edition settings.
-    - [x] rustfmt and clippy are installed (`rustup component add rustfmt clippy`) (verified via `cargo fmt --version` and `cargo clippy --version`).
-        - These are required for `util:format` and `util:lint` to run in a clean environment. Verify by running `rustup component list --installed` or by executing the scripts. If this project is used in CI, make sure the CI image installs these components too.
-    - [x] Config file lives at `~/.koe/config.toml` with a minimal schema (audio, transcribe, summarize, ui) and defaults for local-first.
-        - Required sections: `[audio]` (sample_rate, channels, sources), `[transcribe]` (active), `[transcribe.local]` + `[transcribe.cloud]` (provider, model, api_key), `[summarize]` (active, prompt_profile), `[summarize.local]` + `[summarize.cloud]` (provider, model, api_key), `[ui]` (show_transcript, notes_only_default, color_theme).
-        - Keep all user-facing settings here, including API keys, model choices, and UI toggles. Environment variables may override for CI/dev but are optional for end users.
-        - Ensure `~/.koe/` contains `config.toml`, `models/`, and `sessions/` directories with predictable paths.
-        - Ensure config file permissions are restricted (0600); warn if file is group/world readable.
-        - Add a config version field and lightweight migration path for new fields.
-        - Define a single runtime entry point: `koe` runs the TUI; `koe init` and `koe config` handle setup. Avoid introducing additional top-level commands unless required.
-    - [x] `koe config` subcommand reads/writes config with validation and redacts secrets in terminal output.
-        - Support `--print` (redact keys), `--set key=value` (dotted paths like `transcribe.active=cloud` or `transcribe.local.provider=whisper`), and `--edit` (opens in $EDITOR) for quick changes.
-        - Validate enums (provider names), file paths, and required keys; surface errors with actionable guidance.
-        - Define precedence: CLI flags > config file > env vars (env vars optional), and keep precedence consistent across commands.
-    - [x] `koe init` runs interactive onboarding (local or cloud, model selection, API keys) and persists to config.
-        - Prompt order: permissions guidance, transcribe choice (local/cloud), model selection or download, summarize choice (local/cloud), model selection, API key entry; write config and report the next command to run.
-        - When local transcribe is selected, offer model download options and show disk size; when cloud is selected, prompt for API key and validate non-empty input.
-    - [x] `koe init` prints macOS permission instructions for Screen Recording + Microphone and notes restart requirements.
-        - Keep output minimal and actionable, include the exact System Settings path, mention that permissions may require a restart, and show a single-line checklist of required grants.
+    - [x] Scripts configured: `util:format`, `util:lint`, `util:test`, `util:check` (order preserved; extend `util:check` for new gates; mirror in CI).
+    - [x] Husky hooks configured (pre-commit lint-staged, commit-msg commitlint; minimal wrappers; preserve exec perms).
+    - [x] lint-staged runs full `bun run util:check` (keep full gate; add `util:check:fast` only if optimizing).
+    - [x] commitlint config present (scopes aligned with domains; strict rules; verify on upgrades).
+    - [x] rustfmt config present (deterministic formatting; align with edition).
+    - [x] rustfmt + clippy installed for util scripts (ensure CI installs components).
+    - [x] Config schema at `~/.koe/config.toml` (sections: audio; transcribe local/cloud; summarize local/cloud; ui; version + migration; 0600 perms; dirs `~/.koe/{config.toml,models,sessions}`; env overrides optional).
+    - [x] `koe config` supports `--print`/`--set`/`--edit` with validation, redaction, and precedence CLI > config > env.
+    - [x] `koe init` onboarding for permissions, provider/model selection, API keys; idempotent unless `--force`; prints System Settings path + restart note.
 - Smoke tests:
-    - [x] `bun run util:check` completes (not executed).
-        - Run this once after any major change to confirm the full gate is healthy. If it fails, address the earliest failing step first to avoid cascading errors. Capture the output in CI logs for later debugging.
-    - [x] `koe init` writes `~/.koe/config.toml` and can be re-run idempotently without clobbering user edits.
-        - Re-running init should preserve existing values unless explicitly changed or `--force` is set; report what changed and what was kept.
+    - [x] `bun run util:check` completes (not executed here).
+    - [x] `koe init` writes `~/.koe/config.toml` and is idempotent unless `--force`.
 
 Phase 1: Audio capture + chunking
 
@@ -328,7 +228,7 @@ Phase 4: Latency comparison + polish
         - Derived exports: `audio.wav`, `transcript.md`, `notes.md` written on finalize or explicit export; do not treat markdown as canonical.
         - Metadata schema (TOML): id (uuidv7), start_time (RFC3339), end_time (RFC3339 or null), finalized (bool), context_file, audio_raw_file, audio_wav_file, transcript_file, notes_file, transcribe_provider, transcribe_model, summarize_provider, summarize_model.
         - Transcript JSONL schema: `{id, start_ms, end_ms, speaker, text, finalized, source}`; append per segment, keep one JSON object per line.
-        - Notes JSON schema: full `MeetingState` snapshot with key_points/actions/decisions; include `updated_at` timestamp for snapshots.
+        - Notes JSON schema: `MeetingNotes` snapshot with bullets; include `updated_at` timestamp for snapshots.
         - Audio raw format: PCM f32 little-endian, 48 kHz, mono, interleaved; record exact format in metadata for WAV finalization.
     - [x] Audio, transcript, and notes are continuously written during the session.
         - Persist audio from local capture even when cloud transcribe is used. Write `audio.raw` continuously with periodic flush, and finalize to `audio.wav` on clean shutdown; maintain a transcript append file (e.g., `transcript.jsonl`) and a notes snapshot (`notes.json`).
@@ -418,6 +318,16 @@ Phase 6: TUI design polish
         - Command rows: right-aligned dim category tag, neutral command label; selection highlight in accent color background.
         - No footer in palette; version info already present in title bar. Keep palette clean and minimal.
         - Width ~60 chars, height fits content (max ~15 rows + header); modal blocks underlying input.
+
+Phase 7: Audio quality improvements
+
+- Done criteria:
+    - [ ] Add optional loudness normalization and gentle AGC for recorded mixdown.
+        - Target consistent output level without clipping; ensure it can be disabled.
+    - [ ] Add optional noise reduction path for recorded audio.
+        - Provide a lightweight denoise stage (e.g., RNNoise or spectral gating) with a conservative default.
+    - [ ] Add a simple high-pass filter to reduce rumble before mixdown/export.
+        - Keep cutoff low (e.g., 80–120 Hz) and configurable.
     - [x] Context-aware command sets driven by app state (`crates/koe-cli/src/tui.rs`).
         - Idle: start meeting, switch transcribe/summarize mode, set transcribe/summarize model, edit context, browse sessions.
         - MeetingActive: end meeting, pause capture, force summarize, switch transcribe/summarize mode, edit context.
