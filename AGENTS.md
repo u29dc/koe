@@ -346,6 +346,83 @@ Phase 4: Latency comparison + polish
     - [x] Export produces valid transcript.md and notes.json.
         - Validate the output format with a simple parser or quick manual check. Ensure files include metadata like timestamps or session ID if desired. Confirm the export does not include partial or duplicated entries.
 
+Phase 5: TUI design polish
+
+- Target layout (split view, meeting active):
+
+    ```
+    ┌──────────────────────────────────────────────────────────────────┐
+    │ ■ koe v0.0.1                              ctrl+p command palette │
+    │                                  │                               │
+    │  · They worked with that agency  │  Them: So the timeline is...  │
+    │    before — Sarah                │  Me: Yeah that works for me   │
+    │  · Han knows someone at that     │  Them: We worked with them    │
+    │    agency from a past project    │    before actually            │
+    │  · Budget is flexible up to 50k  │  Me: Oh nice, I know someone  │
+    │    — Them                        │    there from a past project  │
+    │  · Targeting Friday for v2 ship  │  Them: Budget is flexible,    │
+    │  · Han to send draft by Tuesday  │    up to 50k                  │
+    │  · Need repo access shared       │  Me: Let's target Friday      │
+    │    before EOD — Them             │  Them: Works for me           │
+    │                                  │                               │
+    │ 12:34  ▁▂▃▅▃▂▁▂▃▅▃▂  asr:groq lag:1.2s chunks:42/0 segs:18       │
+    └──────────────────────────────────────────────────────────────────┘
+    ```
+
+    Title bar: accent square (U+25A0) + app name left, palette hint right.
+    Content: notes 55% left (rolling moment-capture bullets, no categories) | dim separator | transcript 45% right.
+    Footer: timer | audio viz | compact metrics.
+
+- Command palette overlay (centered modal):
+
+    ```
+    ┌──────────────────────────────────────────┐
+    │           Command Palette                │
+    │ > [filter input]                         │
+    │                                          │
+    │   meeting  end meeting                   │
+    │   meeting  pause capture                 │
+    │   meeting  force summarize               │
+    │   setting  switch ASR provider           │
+    │   setting  switch summarizer             │
+    │   setting  edit context                  │
+    │      view  toggle transcript             │
+    └──────────────────────────────────────────┘
+    ```
+
+    Category tags right-aligned dim; labels neutral; selected row accent bg.
+    No footer in palette; version info already in title bar.
+
+- Done criteria:
+    - [x] Title bar: accent-colored filled square (U+25A0) + `koe v{version}` left-aligned; `ctrl+p command palette` hint right-aligned in muted text; no borders, single styled line (`crates/koe-cli/src/tui.rs`).
+    - [x] Accent color: aqua/turquoise RGB(0, 190, 190) or RGB(80, 200, 200); used only for title square, app name, and command palette selection highlight; everything else grayscale.
+    - [x] No box-drawing borders: panes separated by 1-column dim vertical separator and whitespace; content has 1-char left padding; section names rendered as first line in heading color, not border titles.
+    - [x] Key bindings reduced to minimum: only `ctrl+p` (command palette), `q` (quit), `ctrl+c` (quit); all other actions are palette-only.
+    - [x] Footer redesigned as three zones in one line (`crates/koe-cli/src/tui.rs`).
+        - Left: meeting timer `MM:SS` or `H:MM:SS`; accent color when active, `--:--` muted when idle; frozen at final duration in post-meeting state.
+        - Center-left: ASCII/Unicode audio waveform strip (10-20 chars); characters `~^-_` or block elements `▁▂▃▅▃▂▁`; either reactive (driven by audio RMS/peak from capture ring buffer, sampled every 50ms render tick) or ambient (randomized animation indicating capture active); flat `--------` when capture inactive; muted/dim color.
+        - Right: compact metrics cluster `asr:{provider} lag:{ms}s chunks:{emitted}/{dropped} segs:{count}`; all muted gray, ~40 chars; additional metrics (frames captured/dropped) appended if space allows.
+    - [x] Command palette: centered modal overlay triggered by `ctrl+p`, dismissed with `Esc` (`crates/koe-cli/src/tui.rs`).
+        - Title "Command Palette" centered; `> ` filter input with cursor; fuzzy match narrows visible commands; up/down arrows to navigate, Enter to execute.
+        - Command rows: right-aligned dim category tag, neutral command label; selection highlight in accent color background.
+        - No footer in palette; version info already present in title bar. Keep palette clean and minimal.
+        - Width ~60 chars, height fits content (max ~15 rows + header); modal blocks underlying input.
+    - [x] Context-aware command sets driven by app state (`crates/koe-cli/src/tui.rs`).
+        - Idle: start meeting, switch ASR/summarizer provider, set ASR/summarizer model, edit context, toggle transcript, browse sessions.
+        - MeetingActive: end meeting, pause capture, force summarize, switch ASR/summarizer provider, edit context, toggle transcript.
+        - PostMeeting: copy transcript/notes/audio path to clipboard, open session folder, export markdown, start new meeting, browse sessions.
+    - [x] State machine: Idle -> MeetingActive -> PostMeeting -> Idle; drives palette commands, footer timer behavior, and audio viz state.
+    - [x] Pane layout unchanged: notes-only default (full width); palette "toggle transcript" splits 55/45; notes always visible left, transcript right; last 200 segments; auto-scroll to bottom.
+- Smoke tests:
+    - [ ] `ctrl+p` opens palette overlay with correct commands for current state; Esc dismisses; filter narrows results.
+        - BLOCKED: Requires interactive TUI validation; non-interactive environment cannot open the terminal UI or send key input; tried only code-level implementation; next steps: run `bun run koe`, press `ctrl+p`, verify palette opens, Esc dismisses, and filter narrows; file refs: `crates/koe-cli/src/tui.rs`.
+    - [ ] Footer timer counts up during active meeting, freezes on end, resets on new meeting.
+        - BLOCKED: Requires interactive meeting lifecycle to observe timer behavior; no live TUI session available here; tried only code-level implementation; next steps: run `bun run koe`, start/end/start meetings via palette, confirm timer transitions; file refs: `crates/koe-cli/src/tui.rs`.
+    - [ ] Audio waveform animates during capture, goes flat when stopped.
+        - BLOCKED: Requires live capture and UI rendering; cannot verify animation in this environment; tried only code-level implementation; next steps: run `bun run koe`, start meeting, observe waveform animation; end meeting and confirm flat line; file refs: `crates/koe-cli/src/tui.rs`.
+    - [ ] All actions (toggle transcript, switch provider, edit context, end meeting, copy exports) accessible and functional through palette only.
+        - BLOCKED: Requires manual palette interaction and system integrations (clipboard/open); cannot exercise in non-interactive session; tried only code-level wiring; next steps: run `bun run koe`, open palette and execute each command, confirm expected behavior; file refs: `crates/koe-cli/src/tui.rs`.
+
 ## 9. Resolved Decisions
 
 macOS 15+ only (no legacy), Silero VAD for quality with tuned parameters, local + cloud providers for ASR and summarization from day one, stream-based speaker labeling (mic -> Me, system -> Them).
