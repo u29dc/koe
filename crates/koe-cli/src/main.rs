@@ -16,7 +16,7 @@ use koe_core::types::{
     ActionItem, AudioSource, CaptureStats, MeetingState, NoteItem, NotesOp, NotesPatch,
     SummarizeEvent,
 };
-use raw_audio::SharedRawAudioWriter;
+use raw_audio::{RawAudioMessage, SharedRawAudioWriter, spawn_raw_audio_writer};
 use session::SessionFactory;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -81,6 +81,8 @@ struct RuntimeProfiles {
     local: ProviderConfig,
     cloud: ProviderConfig,
 }
+
+const RAW_AUDIO_QUEUE_CAP: usize = 4;
 
 impl RuntimeProfiles {
     fn from_config(active: &str, local: &ProviderConfig, cloud: &ProviderConfig) -> Self {
@@ -198,33 +200,45 @@ fn env_override(key: &str) -> Option<String> {
 }
 
 fn apply_env_overrides(transcribe: &mut RuntimeProfiles, summarize: &mut RuntimeProfiles) {
-    if let Some(value) = env_override("KOE_TRANSCRIBE_LOCAL_MODEL") {
+    if transcribe.local.model.trim().is_empty()
+        && let Some(value) = env_override("KOE_TRANSCRIBE_LOCAL_MODEL")
+    {
         transcribe.local.model = value;
     }
-    if let Some(value) = env_override("KOE_TRANSCRIBE_CLOUD_MODEL") {
+    if transcribe.cloud.model.trim().is_empty()
+        && let Some(value) = env_override("KOE_TRANSCRIBE_CLOUD_MODEL")
+    {
         transcribe.cloud.model = value;
     }
-    if let Some(value) = env_override("KOE_TRANSCRIBE_CLOUD_API_KEY") {
+    if transcribe.cloud.api_key.trim().is_empty()
+        && let Some(value) = env_override("KOE_TRANSCRIBE_CLOUD_API_KEY")
+    {
         transcribe.cloud.api_key = value;
     }
-    if let Some(value) = env_override("KOE_SUMMARIZE_LOCAL_MODEL") {
+    if summarize.local.model.trim().is_empty()
+        && let Some(value) = env_override("KOE_SUMMARIZE_LOCAL_MODEL")
+    {
         summarize.local.model = value;
     }
-    if let Some(value) = env_override("KOE_SUMMARIZE_CLOUD_MODEL") {
+    if summarize.cloud.model.trim().is_empty()
+        && let Some(value) = env_override("KOE_SUMMARIZE_CLOUD_MODEL")
+    {
         summarize.cloud.model = value;
     }
-    if let Some(value) = env_override("KOE_SUMMARIZE_CLOUD_API_KEY") {
+    if summarize.cloud.api_key.trim().is_empty()
+        && let Some(value) = env_override("KOE_SUMMARIZE_CLOUD_API_KEY")
+    {
         summarize.cloud.api_key = value;
     }
-    if transcribe.cloud.api_key.trim().is_empty() {
-        if let Some(value) = env_override("GROQ_API_KEY") {
-            transcribe.cloud.api_key = value;
-        }
+    if transcribe.cloud.api_key.trim().is_empty()
+        && let Some(value) = env_override("GROQ_API_KEY")
+    {
+        transcribe.cloud.api_key = value;
     }
-    if summarize.cloud.api_key.trim().is_empty() {
-        if let Some(value) = env_override("OPENROUTER_API_KEY") {
-            summarize.cloud.api_key = value;
-        }
+    if summarize.cloud.api_key.trim().is_empty()
+        && let Some(value) = env_override("OPENROUTER_API_KEY")
+    {
+        summarize.cloud.api_key = value;
     }
 }
 
@@ -330,6 +344,14 @@ fn main() {
     };
 
     let shared_writer = SharedRawAudioWriter::new(None);
+    let (raw_tx, raw_rx) = mpsc::sync_channel(RAW_AUDIO_QUEUE_CAP);
+    let raw_writer_handle = match spawn_raw_audio_writer(raw_rx, shared_writer.clone()) {
+        Ok(handle) => Some(handle),
+        Err(err) => {
+            eprintln!("raw audio writer spawn failed: {err}");
+            None
+        }
+    };
 
     let capture_config =
         capture_config_from_sources(&config.audio.sources, &config.audio.microphone_device_id);
@@ -342,11 +364,13 @@ fn main() {
     };
 
     let raw_sink: Option<koe_core::process::RawAudioSink> = {
-        let shared_writer = shared_writer.clone();
+        let raw_tx = raw_tx.clone();
         Some(Box::new(move |source, frame| {
-            if let Err(err) = shared_writer.write_frame(source, frame) {
-                eprintln!("audio write failed: {err}");
-            }
+            let message = RawAudioMessage {
+                source,
+                samples: frame.samples_f32.clone(),
+            };
+            let _ = raw_tx.try_send(message);
         }))
     };
 
@@ -363,7 +387,7 @@ fn main() {
     let _ = ui_tx.send(UiEvent::NotesPatch(NotesPatch { ops: Vec::new() }));
     let (transcribe_cmd_tx, transcribe_cmd_rx) = mpsc::channel();
     let (summarize_cmd_tx, summarize_cmd_rx) = mpsc::channel();
-    let (summarize_tx_transcribe, summarize_rx) = mpsc::channel();
+    let (summarize_tx_transcribe, summarize_rx) = mpsc::sync_channel(1);
     let ui_tx_summarize = ui_tx.clone();
     let ui_tx_transcribe = ui_tx.clone();
     let mut transcribe_profiles_runtime = run.transcribe_profiles.clone();
@@ -545,6 +569,7 @@ fn main() {
                 let active_profile = transcribe_profiles_runtime.active_profile();
                 send_status(current_mode.clone(), active_profile.provider.clone(), true);
                 let mut latency_ms: Option<u128> = None;
+                let mut drain_ack: Option<mpsc::Sender<()>> = None;
 
                 loop {
                     while let Ok(cmd) = transcribe_cmd_rx.try_recv() {
@@ -557,20 +582,19 @@ fn main() {
                                 };
                                 let next_profile =
                                     transcribe_profiles_runtime.profile_for_mode_mut(next_mode);
-                                if next_profile.provider == "whisper" {
-                                    if let Err(e) =
+                                if next_profile.provider == "whisper"
+                                    && let Err(e) =
                                         ensure_whisper_model(&mut next_profile.model, &models_dir)
-                                    {
-                                        eprintln!("init failed: {e}");
-                                        let current_profile = transcribe_profiles_runtime
-                                            .profile_for_mode(&current_mode);
-                                        send_status(
-                                            current_mode.clone(),
-                                            current_profile.provider.clone(),
-                                            false,
-                                        );
-                                        continue;
-                                    }
+                                {
+                                    eprintln!("init failed: {e}");
+                                    let current_profile =
+                                        transcribe_profiles_runtime.profile_for_mode(&current_mode);
+                                    send_status(
+                                        current_mode.clone(),
+                                        current_profile.provider.clone(),
+                                        false,
+                                    );
+                                    continue;
                                 }
 
                                 match create_transcribe_provider(
@@ -602,13 +626,26 @@ fn main() {
                                     }
                                 }
                             }
+                            TranscribeCommand::Drain(ack) => {
+                                drain_ack = Some(ack);
+                            }
                         }
                     }
 
                     let chunk = match chunk_rx.recv_timeout(Duration::from_millis(50)) {
                         Ok(chunk) => chunk,
-                        Err(ChunkRecvTimeoutError::Timeout) => continue,
-                        Err(ChunkRecvTimeoutError::Disconnected) => break,
+                        Err(ChunkRecvTimeoutError::Timeout) => {
+                            if let Some(ack) = drain_ack.take() {
+                                let _ = ack.send(());
+                            }
+                            continue;
+                        }
+                        Err(ChunkRecvTimeoutError::Disconnected) => {
+                            if let Some(ack) = drain_ack.take() {
+                                let _ = ack.send(());
+                            }
+                            break;
+                        }
                     };
 
                     let (mut segments, elapsed) =
@@ -639,7 +676,7 @@ fn main() {
                         }
                     }
 
-                    let _ = summarize_tx_transcribe.send(segments.clone());
+                    let _ = summarize_tx_transcribe.try_send(segments.clone());
 
                     if ui_tx_transcribe
                         .send(UiEvent::Transcript(segments))
@@ -688,6 +725,9 @@ fn main() {
         let _ = handle.join();
     }
     if let Some(handle) = summarize_thread {
+        let _ = handle.join();
+    }
+    if let Some(handle) = raw_writer_handle {
         let _ = handle.join();
     }
 }

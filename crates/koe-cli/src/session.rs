@@ -5,6 +5,9 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -184,8 +187,10 @@ impl SessionHandle {
         let context_value = metadata.context.clone().unwrap_or_default();
         write_atomic(&context_path, context_value.as_bytes())?;
         write_metadata(&metadata_path, &metadata)?;
-        fs::write(audio_raw_path, [])?;
-        fs::write(transcript_path, [])?;
+        fs::write(&audio_raw_path, [])?;
+        set_strict_permissions(&audio_raw_path)?;
+        fs::write(&transcript_path, [])?;
+        set_strict_permissions(&transcript_path)?;
         let notes_snapshot = NotesSnapshot {
             updated_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
             state: MeetingState::default(),
@@ -245,6 +250,7 @@ impl SessionHandle {
     }
 
     pub fn open_audio_raw(&self) -> Result<std::fs::File, SessionError> {
+        warn_if_loose_permissions(&self.audio_raw_path())?;
         Ok(OpenOptions::new()
             .append(true)
             .open(self.audio_raw_path())?)
@@ -260,6 +266,7 @@ impl SessionHandle {
         let mut file = OpenOptions::new()
             .append(true)
             .open(self.transcript_path())?;
+        warn_if_loose_permissions(&self.transcript_path())?;
         for segment in segments {
             let record = TranscriptRecord::from_segment(segment);
             let line = serde_json::to_string(&record)?;
@@ -309,6 +316,18 @@ impl SessionHandle {
         }
         write_atomic(&path, output.as_bytes())?;
         Ok(())
+    }
+
+    pub fn export_audio_wav(&self) -> Result<(), SessionError> {
+        let export_root = self.export_root()?;
+        let wav_path = export_root.join(&self.metadata.audio_wav_file);
+        let raw_path = self.audio_raw_path();
+        write_wav_from_raw(
+            &raw_path,
+            &wav_path,
+            self.metadata.audio_sample_rate_hz,
+            self.metadata.audio_channels,
+        )
     }
 
     pub fn export_notes_markdown(&self, state: &MeetingState) -> Result<(), SessionError> {
@@ -364,6 +383,7 @@ impl SessionHandle {
         state: &MeetingState,
     ) -> Result<(), SessionError> {
         self.write_notes(state)?;
+        self.export_audio_wav()?;
         self.export_transcript_markdown(segments)?;
         self.export_notes_markdown(state)?;
         self.finalize()
@@ -453,7 +473,104 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), SessionError> {
         .ok_or_else(|| io::Error::other("session path missing parent directory"))?;
     let tmp_path = parent.join(".tmp-write");
     fs::write(&tmp_path, contents)?;
+    set_strict_permissions(&tmp_path)?;
     fs::rename(tmp_path, path)?;
+    Ok(())
+}
+
+fn set_strict_permissions(path: &Path) -> Result<(), SessionError> {
+    #[cfg(unix)]
+    {
+        let perm = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(path, perm)?;
+    }
+    Ok(())
+}
+
+fn warn_if_loose_permissions(path: &Path) -> Result<(), SessionError> {
+    #[cfg(unix)]
+    {
+        let metadata = fs::metadata(path)?;
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            eprintln!(
+                "session file {} is group/world readable; set permissions to 0600",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn write_wav_from_raw(
+    raw_path: &Path,
+    wav_path: &Path,
+    sample_rate: u32,
+    channels: u16,
+) -> Result<(), SessionError> {
+    let metadata = fs::metadata(raw_path)?;
+    let byte_len = metadata.len();
+    let channels = channels.max(1);
+    let frame_bytes = u64::from(channels) * 4;
+    if byte_len % frame_bytes != 0 {
+        return Err(io::Error::other("audio.raw length is not aligned to channel frames").into());
+    }
+    let frames = byte_len / frame_bytes;
+
+    let tmp_path = wav_path.with_extension("tmp");
+    let mut reader = fs::File::open(raw_path)?;
+    let mut writer = io::BufWriter::new(fs::File::create(&tmp_path)?);
+    write_wav_header(&mut writer, sample_rate, channels, frames)?;
+    io::copy(&mut reader, &mut writer)?;
+    writer.flush()?;
+    set_strict_permissions(&tmp_path)?;
+    fs::rename(tmp_path, wav_path)?;
+    Ok(())
+}
+
+fn write_wav_header(
+    writer: &mut impl Write,
+    sample_rate: u32,
+    channels: u16,
+    frames: u64,
+) -> Result<(), SessionError> {
+    let bits_per_sample: u16 = 32;
+    let block_align = channels * (bits_per_sample / 8);
+    let byte_rate = sample_rate * u32::from(block_align);
+    let data_size = frames
+        .checked_mul(u64::from(block_align))
+        .ok_or_else(|| io::Error::other("audio length overflow"))?;
+    let data_size_u32: u32 = data_size
+        .try_into()
+        .map_err(|_| io::Error::other("audio too large for wav header"))?;
+    let frames_u32: u32 = frames
+        .try_into()
+        .map_err(|_| io::Error::other("audio too large for wav header"))?;
+
+    let fmt_chunk_size: u32 = 18;
+    let fact_chunk_size: u32 = 4;
+    let file_size = 4 + (8 + fmt_chunk_size) + (8 + fact_chunk_size) + (8 + data_size_u32);
+
+    writer.write_all(b"RIFF")?;
+    writer.write_all(&file_size.to_le_bytes())?;
+    writer.write_all(b"WAVE")?;
+
+    writer.write_all(b"fmt ")?;
+    writer.write_all(&fmt_chunk_size.to_le_bytes())?;
+    writer.write_all(&3u16.to_le_bytes())?;
+    writer.write_all(&channels.to_le_bytes())?;
+    writer.write_all(&sample_rate.to_le_bytes())?;
+    writer.write_all(&byte_rate.to_le_bytes())?;
+    writer.write_all(&block_align.to_le_bytes())?;
+    writer.write_all(&bits_per_sample.to_le_bytes())?;
+    writer.write_all(&0u16.to_le_bytes())?;
+
+    writer.write_all(b"fact")?;
+    writer.write_all(&fact_chunk_size.to_le_bytes())?;
+    writer.write_all(&frames_u32.to_le_bytes())?;
+
+    writer.write_all(b"data")?;
+    writer.write_all(&data_size_u32.to_le_bytes())?;
     Ok(())
 }
 
@@ -489,6 +606,7 @@ mod tests {
         .unwrap();
         let session_id = metadata.id.clone();
         let notes_file = metadata.notes_file.clone();
+        let audio_wav_file = metadata.audio_wav_file.clone();
 
         let mut session = SessionHandle::start(&paths, metadata, None).unwrap();
 
@@ -518,5 +636,8 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&notes_json).unwrap();
         assert!(parsed.get("updated_at").is_some());
         assert!(parsed.get("state").is_some());
+
+        let wav_path = session_dir.join(audio_wav_file);
+        assert!(wav_path.exists());
     }
 }

@@ -1,7 +1,9 @@
-use koe_core::types::{AudioFrame, AudioSource};
+use koe_core::types::AudioSource;
 use std::collections::VecDeque;
 use std::io::{BufWriter, Write};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 
 pub struct RawAudioWriter {
     file: BufWriter<std::fs::File>,
@@ -22,13 +24,13 @@ impl RawAudioWriter {
         }
     }
 
-    pub fn write_frame(&mut self, source: AudioSource, frame: &AudioFrame) -> std::io::Result<()> {
+    pub fn write_samples(&mut self, source: AudioSource, samples: &[f32]) -> std::io::Result<()> {
         match source {
-            AudioSource::System => self.system.extend(frame.samples_f32.iter().copied()),
-            AudioSource::Microphone => self.mic.extend(frame.samples_f32.iter().copied()),
+            AudioSource::System => self.system.extend(samples.iter().copied()),
+            AudioSource::Microphone => self.mic.extend(samples.iter().copied()),
             AudioSource::Mixed => {
                 self.drain_buffers()?;
-                self.write_samples(&frame.samples_f32)?;
+                self.write_samples_inner(samples)?;
                 return Ok(());
             }
         }
@@ -58,7 +60,7 @@ impl RawAudioWriter {
         Ok(())
     }
 
-    fn write_samples(&mut self, samples: &[f32]) -> std::io::Result<()> {
+    fn write_samples_inner(&mut self, samples: &[f32]) -> std::io::Result<()> {
         for sample in samples {
             self.write_sample(*sample)?;
         }
@@ -94,14 +96,32 @@ impl SharedRawAudioWriter {
         }
     }
 
-    pub fn write_frame(&self, source: AudioSource, frame: &AudioFrame) -> std::io::Result<()> {
+    pub fn write_samples(&self, source: AudioSource, samples: &[f32]) -> std::io::Result<()> {
         let mut guard = self
             .inner
             .lock()
             .map_err(|_| std::io::Error::other("raw audio writer lock poisoned"))?;
         if let Some(writer) = guard.as_mut() {
-            writer.write_frame(source, frame)?;
+            writer.write_samples(source, samples)?;
         }
         Ok(())
     }
+}
+
+pub struct RawAudioMessage {
+    pub source: AudioSource,
+    pub samples: Vec<f32>,
+}
+
+pub fn spawn_raw_audio_writer(
+    rx: Receiver<RawAudioMessage>,
+    writer: SharedRawAudioWriter,
+) -> std::io::Result<JoinHandle<()>> {
+    thread::Builder::new()
+        .name("koe-raw-audio-writer".into())
+        .spawn(move || {
+            while let Ok(msg) = rx.recv() {
+                let _ = writer.write_samples(msg.source, &msg.samples);
+            }
+        })
 }
