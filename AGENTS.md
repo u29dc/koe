@@ -229,7 +229,7 @@ Phase 2: ASR + transcript ledger + TUI
         - Keep a local transcript buffer in the TUI state and update it when new events arrive. Render a limited window to keep UI responsive and avoid huge redraws. Make sure text wrapping is stable and that the UI does not flicker on updates.
     - [x] Speaker labeling (mic = "Me", system = "Them").
         - Map `AudioChunk.source` to `TranscriptSegment.speaker` at the time of segment creation. If a mixed stream is used, set speaker to `None` or `Unknown`. This is also the hook to later integrate diarization if needed.
-    - [ ] Provider switching without restart (command surface missing).
+    - [x] Provider switching without restart (command surface missing).
         - Define a command channel from UI to core and support hotkeys to switch providers. Recreate the provider in the ASR worker and emit a status event to update the UI. Ensure in-flight chunks are handled safely during switches.
     - [ ] Status bar shows ASR lag and active provider.
         - Track time spent per chunk in the ASR worker and emit rolling latency metrics. Display the active provider and last latency in the status bar alongside capture stats. This is essential for troubleshooting local vs cloud performance.

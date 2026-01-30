@@ -9,14 +9,25 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::text::Text;
 use ratatui::widgets::Paragraph;
 use std::io;
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::Duration;
+
+#[derive(Debug, Clone, Copy)]
+pub enum AsrCommand {
+    ToggleProvider,
+}
+
+pub enum UiEvent {
+    Transcript(Vec<TranscriptSegment>),
+    AsrStatus { name: String, connected: bool },
+}
 
 pub fn run(
     mut processor: AudioProcessor,
-    transcript_rx: Receiver<Vec<TranscriptSegment>>,
+    ui_rx: Receiver<UiEvent>,
     stats: CaptureStats,
     asr_name: String,
+    asr_cmd_tx: Sender<AsrCommand>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -36,13 +47,19 @@ pub fn run(
     let mut transcript_text = String::from("waiting for transcript...");
     let mut asr_connected = true;
     let mut needs_render = false;
+    let mut asr_name = asr_name;
 
     loop {
         // Drain all pending transcript updates
         loop {
-            match transcript_rx.try_recv() {
-                Ok(segments) => {
+            match ui_rx.try_recv() {
+                Ok(UiEvent::Transcript(segments)) => {
                     ledger.append(segments);
+                    needs_render = true;
+                }
+                Ok(UiEvent::AsrStatus { name, connected }) => {
+                    asr_name = name;
+                    asr_connected = connected;
                     needs_render = true;
                 }
                 Err(TryRecvError::Empty) => break,
@@ -92,6 +109,9 @@ pub fn run(
                         && key.modifiers.contains(KeyModifiers::CONTROL))
                 {
                     break;
+                }
+                if key.code == KeyCode::Char('p') {
+                    let _ = asr_cmd_tx.send(AsrCommand::ToggleProvider);
                 }
             }
         }

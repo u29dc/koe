@@ -4,9 +4,12 @@ mod tui;
 use clap::{Parser, Subcommand};
 use koe_core::asr::create_asr;
 use koe_core::capture::create_capture;
+use koe_core::process::ChunkRecvTimeoutError;
 use koe_core::types::{AudioSource, CaptureStats};
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
+use tui::{AsrCommand, UiEvent};
 
 #[derive(Parser)]
 #[command(name = "koe", version, about = "meeting transcription engine")]
@@ -73,31 +76,22 @@ fn main() {
         }
     };
 
-    let model_trn_env = std::env::var("KOE_WHISPER_MODEL").ok();
-    let model_groq_env = std::env::var("KOE_GROQ_MODEL").ok();
-    let mut model_trn_owned = if run.asr == "groq" {
-        run.model_trn.clone().or(model_groq_env)
-    } else {
-        run.model_trn.clone().or(model_trn_env)
-    };
+    let whisper_model_env = std::env::var("KOE_WHISPER_MODEL").ok();
+    let groq_model_env = std::env::var("KOE_GROQ_MODEL").ok();
+    let mut whisper_model = run.model_trn.clone().or(whisper_model_env);
+    let groq_model = run.model_trn.clone().or(groq_model_env);
 
-    if run.asr == "whisper" && model_trn_owned.is_none() {
-        let init_args = init::InitArgs {
-            model: "base.en".to_string(),
-            dir: None,
-            force: false,
-            groq_key: None,
-        };
-        match init::run(&init_args) {
-            Ok(path) => model_trn_owned = Some(path.to_string_lossy().to_string()),
-            Err(e) => {
-                eprintln!("init failed: {e}");
-                std::process::exit(1);
-            }
+    if run.asr == "whisper" {
+        if let Err(e) = ensure_whisper_model(&mut whisper_model) {
+            eprintln!("init failed: {e}");
+            std::process::exit(1);
         }
     }
 
-    let mut asr = match create_asr(run.asr.as_str(), model_trn_owned.as_deref()) {
+    let mut asr = match create_asr(
+        run.asr.as_str(),
+        model_for_provider(run.asr.as_str(), &whisper_model, groq_model.as_deref()),
+    ) {
         Ok(provider) => provider,
         Err(e) => {
             eprintln!("asr init failed: {e}");
@@ -106,12 +100,65 @@ fn main() {
     };
 
     let asr_name = asr.name().to_string();
-    let (transcript_tx, transcript_rx) = mpsc::channel();
+    let (ui_tx, ui_rx) = mpsc::channel();
+    let (asr_cmd_tx, asr_cmd_rx) = mpsc::channel();
 
     let asr_thread = match thread::Builder::new()
         .name("koe-asr".into())
         .spawn(move || {
-            while let Ok(chunk) = chunk_rx.recv() {
+            let mut current_provider = run.asr.clone();
+            let mut whisper_model = whisper_model;
+            let groq_model = groq_model;
+
+            let send_status = |name: String, connected: bool| {
+                let _ = ui_tx.send(UiEvent::AsrStatus { name, connected });
+            };
+
+            send_status(asr.name().to_string(), true);
+
+            loop {
+                while let Ok(cmd) = asr_cmd_rx.try_recv() {
+                    match cmd {
+                        AsrCommand::ToggleProvider => {
+                            let next = if current_provider == "whisper" {
+                                "groq"
+                            } else {
+                                "whisper"
+                            };
+
+                            let next_model = match next {
+                                "whisper" => {
+                                    if let Err(e) = ensure_whisper_model(&mut whisper_model) {
+                                        eprintln!("init failed: {e}");
+                                        continue;
+                                    }
+                                    whisper_model.as_deref()
+                                }
+                                "groq" => groq_model.as_deref(),
+                                _ => None,
+                            };
+
+                            match create_asr(next, next_model) {
+                                Ok(provider) => {
+                                    asr = provider;
+                                    current_provider = next.to_string();
+                                    send_status(asr.name().to_string(), true);
+                                }
+                                Err(e) => {
+                                    eprintln!("asr switch failed: {e}");
+                                    send_status(current_provider.clone(), false);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let chunk = match chunk_rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(chunk) => chunk,
+                    Err(ChunkRecvTimeoutError::Timeout) => continue,
+                    Err(ChunkRecvTimeoutError::Disconnected) => break,
+                };
+
                 let mut segments = match asr.transcribe(&chunk) {
                     Ok(s) => s,
                     Err(e) => {
@@ -132,7 +179,7 @@ fn main() {
                     }
                 }
 
-                if transcript_tx.send(segments).is_err() {
+                if ui_tx.send(UiEvent::Transcript(segments)).is_err() {
                     break;
                 }
             }
@@ -144,7 +191,7 @@ fn main() {
         }
     };
 
-    if let Err(e) = tui::run(processor, transcript_rx, stats_display, asr_name) {
+    if let Err(e) = tui::run(processor, ui_rx, stats_display, asr_name, asr_cmd_tx) {
         eprintln!("tui error: {e}");
         std::process::exit(1);
     }
@@ -159,6 +206,34 @@ fn default_speaker(source: AudioSource) -> Option<&'static str> {
         AudioSource::Microphone => Some("Me"),
         AudioSource::System => Some("Them"),
         AudioSource::Mixed => Some("Unknown"),
+    }
+}
+
+fn ensure_whisper_model(model: &mut Option<String>) -> Result<(), String> {
+    if model.is_some() {
+        return Ok(());
+    }
+
+    let init_args = init::InitArgs {
+        model: "base.en".to_string(),
+        dir: None,
+        force: false,
+        groq_key: None,
+    };
+    let path = init::run(&init_args).map_err(|e| e.to_string())?;
+    *model = Some(path.to_string_lossy().to_string());
+    Ok(())
+}
+
+fn model_for_provider<'a>(
+    provider: &str,
+    whisper_model: &'a Option<String>,
+    groq_model: Option<&'a str>,
+) -> Option<&'a str> {
+    match provider {
+        "whisper" => whisper_model.as_deref(),
+        "groq" => groq_model,
+        _ => None,
     }
 }
 

@@ -7,6 +7,7 @@ use crate::capture::AudioCapture;
 use crate::error::ProcessError;
 use crate::types::{AudioSource, CaptureStats};
 use chunker::Chunker;
+pub use queue::ChunkRecvTimeoutError;
 use queue::{ChunkReceiver, ChunkSender, SendOutcome, chunk_channel};
 use resample::ResampleConverter;
 use std::sync::Arc;
