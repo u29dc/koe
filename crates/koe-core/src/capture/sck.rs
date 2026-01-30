@@ -52,12 +52,11 @@ impl SckCapture {
             .with_sample_rate(SAMPLE_RATE as i32)
             .with_channel_count(1);
 
-        if capture_config.capture_microphone {
-            if let Some(device_id) = capture_config.microphone_device_id.as_deref() {
-                if !device_id.trim().is_empty() {
-                    stream_config.set_microphone_capture_device_id(device_id);
-                }
-            }
+        if capture_config.capture_microphone
+            && let Some(device_id) = capture_config.microphone_device_id.as_deref()
+            && !device_id.trim().is_empty()
+        {
+            stream_config.set_microphone_capture_device_id(device_id);
         }
 
         // Create stream and add output handlers for system audio and microphone

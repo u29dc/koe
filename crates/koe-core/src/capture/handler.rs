@@ -2,8 +2,7 @@ use crate::types::CaptureStats;
 use screencapturekit::cm::CMSampleBuffer;
 use screencapturekit::stream::output_trait::SCStreamOutputTrait;
 use screencapturekit::stream::output_type::SCStreamOutputType;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
 
 /// Ring buffer capacity: 10 seconds at 48 kHz mono.
 const RING_CAPACITY: usize = 480_000;
@@ -20,22 +19,15 @@ pub struct AudioRing {
 struct AudioProducer {
     samples: rtrb::Producer<f32>,
     pts: rtrb::Producer<(i128, usize)>,
-    drop_count: Arc<AtomicU64>,
     mono_scratch: Vec<f32>,
-}
-
-/// Shared state between system and microphone output handlers.
-struct SharedHandlerState {
-    system_producer: Mutex<AudioProducer>,
-    mic_producer: Mutex<AudioProducer>,
-    stats: CaptureStats,
 }
 
 /// RT-safe ScreenCaptureKit output handler.
 /// Copies f32 audio samples into SPSC ring buffers.
-/// Each instance holds a shared reference to the producer state.
 pub struct OutputHandler {
-    state: Arc<SharedHandlerState>,
+    producer: RefCell<AudioProducer>,
+    stats: CaptureStats,
+    target: SCStreamOutputType,
 }
 
 /// Create a pair of output handlers (system audio + microphone) with their paired consumer rings.
@@ -49,26 +41,24 @@ pub fn create_output_handlers(
     let (mic_samples_prod, mic_samples_cons) = rtrb::RingBuffer::new(RING_CAPACITY);
     let (mic_pts_prod, mic_pts_cons) = rtrb::RingBuffer::new(PTS_RING_CAPACITY);
 
-    let state = Arc::new(SharedHandlerState {
-        system_producer: Mutex::new(AudioProducer {
+    let system_handler = OutputHandler {
+        producer: RefCell::new(AudioProducer {
             samples: sys_samples_prod,
             pts: sys_pts_prod,
-            drop_count: Arc::new(AtomicU64::new(0)),
             mono_scratch: Vec::with_capacity(RING_CAPACITY),
         }),
-        mic_producer: Mutex::new(AudioProducer {
+        stats: stats.clone(),
+        target: SCStreamOutputType::Audio,
+    };
+    let mic_handler = OutputHandler {
+        producer: RefCell::new(AudioProducer {
             samples: mic_samples_prod,
             pts: mic_pts_prod,
-            drop_count: Arc::new(AtomicU64::new(0)),
             mono_scratch: Vec::with_capacity(RING_CAPACITY),
         }),
         stats,
-    });
-
-    let system_handler = OutputHandler {
-        state: Arc::clone(&state),
+        target: SCStreamOutputType::Microphone,
     };
-    let mic_handler = OutputHandler { state };
 
     let system_ring = AudioRing {
         samples: sys_samples_cons,
@@ -85,16 +75,9 @@ pub fn create_output_handlers(
 
 impl SCStreamOutputTrait for OutputHandler {
     fn did_output_sample_buffer(&self, sample: CMSampleBuffer, of_type: SCStreamOutputType) {
-        let mutex = match of_type {
-            SCStreamOutputType::Audio => &self.state.system_producer,
-            SCStreamOutputType::Microphone => &self.state.mic_producer,
-            SCStreamOutputType::Screen => return,
-        };
-
-        let Ok(mut producer) = mutex.try_lock() else {
-            self.state.stats.inc_frames_dropped();
+        if of_type != self.target {
             return;
-        };
+        }
 
         let Some(audio_list) = sample.audio_buffer_list() else {
             return;
@@ -105,6 +88,11 @@ impl SCStreamOutputTrait for OutputHandler {
             (pts.value as i128 * 1_000_000_000) / pts.timescale as i128
         } else {
             0
+        };
+
+        let Ok(mut producer) = self.producer.try_borrow_mut() else {
+            self.stats.inc_frames_dropped();
+            return;
         };
 
         for buffer in audio_list.iter() {
@@ -123,15 +111,13 @@ impl SCStreamOutputTrait for OutputHandler {
             let AudioProducer {
                 samples: samples_prod,
                 pts: pts_prod,
-                drop_count,
                 mono_scratch,
             } = &mut *producer;
 
             let samples = match downmix_to_mono(f32_slice, channels, mono_scratch) {
                 Some(samples) => samples,
                 None => {
-                    drop_count.fetch_add(1, Ordering::Relaxed);
-                    self.state.stats.inc_frames_dropped();
+                    self.stats.inc_frames_dropped();
                     return;
                 }
             };
@@ -139,8 +125,7 @@ impl SCStreamOutputTrait for OutputHandler {
             // Check if ring has space
             let available = samples_prod.slots();
             if available < samples.len() {
-                drop_count.fetch_add(1, Ordering::Relaxed);
-                self.state.stats.inc_frames_dropped();
+                self.stats.inc_frames_dropped();
                 return;
             }
 
@@ -162,8 +147,7 @@ impl SCStreamOutputTrait for OutputHandler {
                         written += len;
                     }
                     Err(_) => {
-                        producer.drop_count.fetch_add(1, Ordering::Relaxed);
-                        self.state.stats.inc_frames_dropped();
+                        self.stats.inc_frames_dropped();
                         return;
                     }
                 }
