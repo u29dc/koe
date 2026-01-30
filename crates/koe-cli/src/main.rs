@@ -8,7 +8,7 @@ mod tui;
 use clap::{Parser, Subcommand};
 use config::{Config, ConfigPaths};
 use koe_core::asr::{AsrProvider, create_asr};
-use koe_core::capture::{CaptureConfig, create_capture};
+use koe_core::capture::{CaptureConfig, create_capture, list_audio_inputs};
 use koe_core::process::ChunkRecvTimeoutError;
 use koe_core::types::{AudioSource, CaptureStats, NotesPatch};
 use raw_audio::SharedRawAudioWriter;
@@ -431,16 +431,44 @@ fn capture_config_from_sources(sources: &[String], mic_device_id: &str) -> Captu
     let capture_microphone = sources
         .iter()
         .any(|source| matches!(source.as_str(), "microphone" | "mixed"));
-    let microphone_device_id = if mic_device_id.trim().is_empty() {
-        None
-    } else {
-        Some(mic_device_id.trim().to_string())
-    };
+    let microphone_device_id = resolve_microphone_device_id(capture_microphone, mic_device_id);
     CaptureConfig {
         capture_system,
         capture_microphone,
         microphone_device_id,
     }
+}
+
+fn resolve_microphone_device_id(capture_microphone: bool, mic_device_id: &str) -> Option<String> {
+    if !capture_microphone {
+        return None;
+    }
+    let trimmed = mic_device_id.trim();
+    if !trimmed.is_empty() {
+        return Some(trimmed.to_string());
+    }
+    let inputs = list_audio_inputs();
+    select_default_microphone(&inputs)
+}
+
+fn select_default_microphone(inputs: &[koe_core::capture::AudioInputDeviceInfo]) -> Option<String> {
+    if inputs.is_empty() {
+        return None;
+    }
+    let built_in = inputs.iter().find(|device| {
+        let name = device.name.to_lowercase();
+        device.id == "BuiltInMicrophoneDevice"
+            || name.contains("built-in")
+            || name.contains("built in")
+            || name.contains("macbook")
+    });
+    if let Some(device) = built_in {
+        return Some(device.id.clone());
+    }
+    inputs
+        .iter()
+        .find(|device| device.is_default)
+        .map(|device| device.id.clone())
 }
 
 fn transcribe_with_latency(
@@ -474,8 +502,9 @@ fn apply_config_env(config: &Config, run: &ResolvedRunArgs) {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_speaker, transcribe_with_latency};
+    use super::{default_speaker, select_default_microphone, transcribe_with_latency};
     use koe_core::asr::AsrProvider;
+    use koe_core::capture::AudioInputDeviceInfo;
     use koe_core::types::{AudioChunk, AudioSource, TranscriptSegment};
     use std::time::Duration;
 
@@ -524,5 +553,44 @@ mod tests {
         };
         let (_segments, elapsed) = transcribe_with_latency(&mut asr, &chunk).unwrap();
         assert!(elapsed < 4_000);
+    }
+
+    #[test]
+    fn select_default_microphone_prefers_built_in() {
+        let inputs = vec![
+            AudioInputDeviceInfo {
+                id: "BT-MIC".to_string(),
+                name: "WH-1000XM5".to_string(),
+                is_default: true,
+            },
+            AudioInputDeviceInfo {
+                id: "BuiltInMicrophoneDevice".to_string(),
+                name: "MacBook Pro Microphone".to_string(),
+                is_default: false,
+            },
+        ];
+        assert_eq!(
+            select_default_microphone(&inputs).as_deref(),
+            Some("BuiltInMicrophoneDevice")
+        );
+    }
+
+    #[test]
+    fn select_default_microphone_falls_back_to_default() {
+        let inputs = vec![AudioInputDeviceInfo {
+            id: "USB-MIC".to_string(),
+            name: "USB Microphone".to_string(),
+            is_default: true,
+        }];
+        assert_eq!(
+            select_default_microphone(&inputs).as_deref(),
+            Some("USB-MIC")
+        );
+    }
+
+    #[test]
+    fn select_default_microphone_handles_empty_list() {
+        let inputs = Vec::new();
+        assert_eq!(select_default_microphone(&inputs), None);
     }
 }
