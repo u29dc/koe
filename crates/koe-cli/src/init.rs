@@ -12,7 +12,7 @@ pub struct InitArgs {
     #[arg(long, default_value = DEFAULT_MODEL)]
     pub model: String,
 
-    /// Override models directory (default: ./models)
+    /// Override models directory (default: ~/.koe/models)
     #[arg(long)]
     pub dir: Option<PathBuf>,
 
@@ -56,6 +56,9 @@ fn resolve_models_dir(dir: Option<&PathBuf>) -> PathBuf {
     }
     if let Ok(env_dir) = std::env::var("KOE_MODELS_DIR") {
         return PathBuf::from(env_dir);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".koe").join("models");
     }
     PathBuf::from("models")
 }
