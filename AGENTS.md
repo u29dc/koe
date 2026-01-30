@@ -297,7 +297,7 @@ Phase 3: Notes engine (patch-only)
         - Use stable labels (“Me”, “Them”) and keep the label prefix minimal (e.g., `Me:`) so notes stay compact.
     - [x] Notes pane updates incrementally in real time without full redraws.
         - Patch application updates the data model and the UI only re-renders the visible notes list; maintain ordering and avoid flicker.
-    - [ ] OpenRouter role infrastructure uses a stable system prompt and config-driven model selection.
+    - [x] OpenRouter role infrastructure uses a stable system prompt and config-driven model selection.
         - System prompt must enforce patch-only JSON output and concise summaries; model and API key come from config, not env vars.
     - [ ] Summarizer prompt includes optional meeting context and preferred participant names.
         - Inject context ahead of transcript; if context is empty, omit the section entirely to avoid noise.
