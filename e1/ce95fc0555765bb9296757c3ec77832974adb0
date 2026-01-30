@@ -1,0 +1,23 @@
+commitlint.config.js
+  9c7196d544149fff 1-13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.40",
+  "base_commit_sha": "e1ce95fc0555765bb9296757c3ec77832974adb0",
+  "prompts": {
+    "9c7196d544149fff": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6cd2b282-8ea7-4a4c-aa29-306042a3ab33",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 13,
+      "total_deletions": 58,
+      "accepted_lines": 13,
+      "overriden_lines": 0
+    }
+  }
+}
