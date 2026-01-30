@@ -281,7 +281,14 @@ fn main() {
         }
     };
 
-    if let Err(e) = tui::run(processor, ui_rx, stats_display, asr_name, asr_cmd_tx) {
+    if let Err(e) = tui::run(
+        processor,
+        ui_rx,
+        stats_display,
+        asr_name,
+        asr_cmd_tx,
+        config.ui.clone(),
+    ) {
         eprintln!("tui error: {e}");
         std::process::exit(1);
     }

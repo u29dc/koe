@@ -253,11 +253,11 @@ Phase 2: ASR + transcript ledger + TUI
         - Track time spent per chunk in the ASR worker and emit rolling latency metrics. Display the active provider and last latency in the status bar alongside capture stats. This is essential for troubleshooting local vs cloud performance.
     - [x] Mutable window corrections only affect last 15 s (not implemented).
         - Implement a mutable transcript window and finalize segments that are older than the window. When new ASR results overlap finalized segments, do not alter them. Keep this window consistent with the chunk overlap to prevent duplicate text.
-    - [ ] Minimal full-screen TUI with a focused notes pane and optional transcript pane.
+    - [x] Minimal full-screen TUI with a focused notes pane and optional transcript pane.
         - Default view is notes-only; toggle transcript visibility with a single key (e.g., `t`). When visible, show transcript on one side and notes on the other with stable layout and no flicker.
         - Provide a clear status line with provider/lag/capture stats, and keep layout stable when toggling panes (no shifting widths).
         - Document key bindings in a single place (help overlay or footer) and keep them consistent: quit, toggle transcript, switch provider, set context.
-    - [ ] Color system: other-party content uses a restrained blue, self content uses neutral gray, headings are subtle and consistent.
+    - [x] Color system: other-party content uses a restrained blue, self content uses neutral gray, headings are subtle and consistent.
         - Apply colors consistently in both transcript and notes; blue is reserved for “Them” content, gray for “Me,” and neutral for headings/metadata.
         - Keep palette minimal and readable; avoid bright or noisy styling. Ensure colors remain legible in common terminal themes.
     - [ ] TUI clean shutdown restores terminal even on panic.
