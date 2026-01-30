@@ -332,7 +332,7 @@ Phase 4: Latency comparison + polish
         - Use atomic write patterns for metadata and notes snapshots (write temp + rename) to survive crashes.
         - Define checkpoint interval (e.g., every 5–10 s) and ensure partial data is still readable on crash.
         - Rationale: JSONL for append-only streams (transcript, optional patch log), JSON/TOML for single-record snapshots (metadata/notes), Markdown only for human export.
-    - [ ] Crash-safe recovery: partial sessions can be reopened and exported.
+    - [x] Crash-safe recovery: partial sessions can be reopened and exported.
         - Ensure incomplete sessions still have usable transcript/notes; metadata should include `finalized=false` and last_update timestamp for recovery tooling.
     - [ ] Export transcript/notes on quit.
         - On shutdown, persist the transcript and notes to files (e.g., `transcript.md`, `notes.json`). Ensure the export path is configurable and errors are surfaced cleanly. Do not block UI shutdown indefinitely; use a bounded export timeout.
