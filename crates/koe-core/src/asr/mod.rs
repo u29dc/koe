@@ -11,20 +11,21 @@ pub trait AsrProvider: Send {
 
 /// Create an ASR provider by name.
 ///
-/// - `"whisper"` requires `model_path` pointing to a GGML model file.
-/// - `"groq"` reads `GROQ_API_KEY` from the environment.
-pub fn create_asr(
-    provider: &str,
-    model_path: Option<&str>,
-) -> Result<Box<dyn AsrProvider>, AsrError> {
+/// - `"whisper"` requires `model` pointing to a GGML model file path.
+/// - `"groq"` reads `GROQ_API_KEY` from the environment; `model` selects the
+///   Groq model name (defaults to `whisper-large-v3-turbo`).
+pub fn create_asr(provider: &str, model: Option<&str>) -> Result<Box<dyn AsrProvider>, AsrError> {
     match provider {
         "whisper" => {
-            let path = model_path.ok_or_else(|| {
-                AsrError::ModelLoad("model_path required for whisper provider".into())
+            let path = model.ok_or_else(|| {
+                AsrError::ModelLoad(
+                    "model path required for whisper provider (--model-trn /path/to/ggml-*.bin)"
+                        .into(),
+                )
             })?;
             Ok(Box::new(whisper::WhisperProvider::new(path)?))
         }
-        "groq" => Ok(Box::new(groq::GroqProvider::new()?)),
+        "groq" => Ok(Box::new(groq::GroqProvider::new(model)?)),
         other => Err(AsrError::ModelLoad(format!(
             "unknown ASR provider: {other}"
         ))),

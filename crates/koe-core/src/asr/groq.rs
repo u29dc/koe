@@ -8,10 +8,12 @@ use crate::{AsrError, AudioChunk, TranscriptSegment};
 use super::{AsrProvider, encode_wav};
 
 const GROQ_TRANSCRIPTIONS_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
+const DEFAULT_MODEL: &str = "whisper-large-v3-turbo";
 
 /// Cloud ASR provider using the Groq Whisper API.
 pub struct GroqProvider {
     api_key: String,
+    model: String,
     segment_id: AtomicU64,
 }
 
@@ -29,11 +31,12 @@ struct GroqSegment {
 }
 
 impl GroqProvider {
-    pub fn new() -> Result<Self, AsrError> {
+    pub fn new(model: Option<&str>) -> Result<Self, AsrError> {
         let api_key = std::env::var("GROQ_API_KEY")
             .map_err(|_| AsrError::ModelLoad("GROQ_API_KEY not set".into()))?;
         Ok(Self {
             api_key,
+            model: model.unwrap_or(DEFAULT_MODEL).to_owned(),
             segment_id: AtomicU64::new(0),
         })
     }
@@ -48,7 +51,7 @@ impl AsrProvider for GroqProvider {
         let wav_data = encode_wav(&chunk.pcm_mono_f32, chunk.sample_rate_hz);
 
         let form = Form::new()
-            .text("model", "whisper-large-v3-turbo")
+            .text("model", self.model.as_str())
             .text("response_format", "verbose_json")
             .text("language", "en")
             .part(
