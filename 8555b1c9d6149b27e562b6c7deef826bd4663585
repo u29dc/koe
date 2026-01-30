@@ -1,0 +1,25 @@
+crates/koe-core/src/capture/handler.rs
+  53463938ff7b3fbe 25-30,33,35,38-40,47,58-61,63,75,81-82
+crates/koe-core/src/capture/sck.rs
+  53463938ff7b3fbe 22-23,47,49-50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.40",
+  "base_commit_sha": "8555b1c9d6149b27e562b6c7deef826bd4663585",
+  "prompts": {
+    "53463938ff7b3fbe": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "31a9c490-0a28-4f67-9a8c-6bbf46e7129b",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 25,
+      "total_deletions": 11,
+      "accepted_lines": 25,
+      "overriden_lines": 0
+    }
+  }
+}
