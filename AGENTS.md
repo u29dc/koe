@@ -343,7 +343,7 @@ Phase 4: Latency comparison + polish
     - [ ] Kill the process mid-session and confirm recovery files exist.
         - Verify audio, transcript, notes, and metadata are present and readable, with `finalized=false`.
         - BLOCKED: Requires an interactive session and forced termination to inspect on-disk artifacts; cannot run or kill interactive process here; tried only code-level persistence checks; next steps: start `bun run koe`, speak for 1–2 minutes, kill process, confirm `~/.koe/sessions/{id}` contains `audio.raw`, `transcript.jsonl`, `notes.json`, `metadata.toml` with `finalized=false`; file refs: `crates/koe-cli/src/session.rs`.
-    - [ ] Export produces valid transcript.md and notes.json.
+    - [x] Export produces valid transcript.md and notes.json.
         - Validate the output format with a simple parser or quick manual check. Ensure files include metadata like timestamps or session ID if desired. Confirm the export does not include partial or duplicated entries.
 
 ## 9. Resolved Decisions
