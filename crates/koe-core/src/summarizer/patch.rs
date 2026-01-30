@@ -10,7 +10,15 @@ pub(crate) fn build_prompt(
     let transcript = recent
         .iter()
         .filter(|s| s.finalized)
-        .map(|s| format!("[{}-{}] {}", s.start_ms, s.end_ms, s.text.trim()))
+        .map(|s| {
+            let text = s.text.trim();
+            match s.speaker.as_deref() {
+                Some(speaker) if !speaker.is_empty() => {
+                    format!("[{}-{}] {speaker}: {text}", s.start_ms, s.end_ms)
+                }
+                _ => format!("[{}-{}] {text}", s.start_ms, s.end_ms),
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let state_json = serde_json::to_string(state).unwrap_or_else(|_| "{}".to_string());
@@ -20,7 +28,7 @@ pub(crate) fn build_prompt(
         .unwrap_or_default();
 
     format!(
-        "You are a meeting notes engine. Return ONLY valid JSON with this schema:\n{{\n  \"ops\": [\n    {{\"op\": \"add_key_point\", \"id\": \"kp_1\", \"text\": \"...\", \"evidence\": [1,2]}}\n  ]\n}}\n\nRules:\n- patch-only: add/update ops only, no deletes\n- stable IDs: reuse IDs when updating\n- evidence is a list of transcript segment IDs\n- if no updates, return {{\"ops\": []}}\n- keep notes minimal and information-dense, no filler or repetition\n- prefer short noun phrases; avoid full sentences when possible\n- each text is <= 120 characters and <= 1 sentence\n- return at most 5 ops per response\n\n{context_block}Transcript:\n{transcript}\n\nCurrent state JSON:\n{state_json}\n"
+        "You are a meeting notes engine. Return ONLY valid JSON with this schema:\n{{\n  \"ops\": [\n    {{\"op\": \"add_key_point\", \"id\": \"kp_1\", \"text\": \"...\", \"evidence\": [1,2]}}\n  ]\n}}\n\nRules:\n- patch-only: add/update ops only, no deletes\n- stable IDs: reuse IDs when updating\n- evidence is a list of transcript segment IDs\n- if no updates, return {{\"ops\": []}}\n- keep notes minimal and information-dense, no filler or repetition\n- prefer short noun phrases; avoid full sentences when possible\n- each text is <= 120 characters and <= 1 sentence\n- return at most 5 ops per response\n- if a transcript line includes a speaker label, preserve it in note text as \"Me:\" or \"Them:\"\n\n{context_block}Transcript:\n{transcript}\n\nCurrent state JSON:\n{state_json}\n"
     )
 }
 
@@ -195,5 +203,13 @@ mod tests {
         assert!(prompt.contains("information-dense"));
         assert!(prompt.contains("<= 120"));
         assert!(prompt.contains("at most 5 ops"));
+    }
+
+    #[test]
+    fn build_prompt_includes_speaker_labels() {
+        let mut with_speaker = seg(1, "hello");
+        with_speaker.speaker = Some("Me".to_string());
+        let prompt = build_prompt(&[with_speaker], &MeetingState::default(), None);
+        assert!(prompt.contains("Me: hello"));
     }
 }
