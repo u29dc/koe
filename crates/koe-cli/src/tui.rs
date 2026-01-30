@@ -20,6 +20,7 @@ pub enum AsrCommand {
 pub enum UiEvent {
     Transcript(Vec<TranscriptSegment>),
     AsrStatus { name: String, connected: bool },
+    AsrLag { last_ms: u128 },
 }
 
 pub fn run(
@@ -48,6 +49,7 @@ pub fn run(
     let mut asr_connected = true;
     let mut needs_render = false;
     let mut asr_name = asr_name;
+    let mut asr_lag_ms: Option<u128> = None;
 
     loop {
         // Drain all pending transcript updates
@@ -60,6 +62,10 @@ pub fn run(
                 Ok(UiEvent::AsrStatus { name, connected }) => {
                     asr_name = name;
                     asr_connected = connected;
+                    needs_render = true;
+                }
+                Ok(UiEvent::AsrLag { last_ms }) => {
+                    asr_lag_ms = Some(last_ms);
                     needs_render = true;
                 }
                 Err(TryRecvError::Empty) => break,
@@ -88,10 +94,14 @@ pub fn run(
             frame.render_widget(transcript, transcript_area);
 
             let asr_status = if asr_connected { "ok" } else { "disconnected" };
+            let lag_text = asr_lag_ms
+                .map(|ms| format!("{ms}ms"))
+                .unwrap_or_else(|| "n/a".to_string());
             let status = Paragraph::new(Text::raw(format!(
-                "asr: {} ({})  frames: {}  drops: {}  chunks: {}/{}  segments: {}",
+                "asr: {} ({})  lag: {}  frames: {}  drops: {}  chunks: {}/{}  segments: {}",
                 asr_name,
                 asr_status,
+                lag_text,
                 stats.frames_captured(),
                 stats.frames_dropped(),
                 stats.chunks_emitted(),

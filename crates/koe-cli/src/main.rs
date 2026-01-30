@@ -8,7 +8,7 @@ use koe_core::process::ChunkRecvTimeoutError;
 use koe_core::types::{AudioSource, CaptureStats};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tui::{AsrCommand, UiEvent};
 
 #[derive(Parser)]
@@ -115,6 +115,7 @@ fn main() {
             };
 
             send_status(asr.name().to_string(), true);
+            let mut latency_ms: Option<u128> = None;
 
             loop {
                 while let Ok(cmd) = asr_cmd_rx.try_recv() {
@@ -159,6 +160,7 @@ fn main() {
                     Err(ChunkRecvTimeoutError::Disconnected) => break,
                 };
 
+                let start = Instant::now();
                 let mut segments = match asr.transcribe(&chunk) {
                     Ok(s) => s,
                     Err(e) => {
@@ -170,6 +172,14 @@ fn main() {
                 if segments.is_empty() {
                     continue;
                 }
+
+                let elapsed = start.elapsed().as_millis();
+                let smoothed = match latency_ms {
+                    Some(prev) => (prev * 9 + elapsed) / 10,
+                    None => elapsed,
+                };
+                latency_ms = Some(smoothed);
+                let _ = ui_tx.send(UiEvent::AsrLag { last_ms: smoothed });
 
                 if let Some(speaker) = default_speaker(chunk.source) {
                     for seg in &mut segments {
