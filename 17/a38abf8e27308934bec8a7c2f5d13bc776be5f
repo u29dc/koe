@@ -1,0 +1,47 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.40",
+  "base_commit_sha": "17a38abf8e27308934bec8a7c2f5d13bc776be5f",
+  "prompts": {
+    "c379e91a608412cb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2aca0f9f-b015-405f-92ce-c75d0db4f8e9",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 4,
+      "total_deletions": 2,
+      "accepted_lines": 0,
+      "overriden_lines": 6
+    },
+    "da422e719d47ca0d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8793c547-0568-469b-a1e8-3db189d73e03",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 2,
+      "total_deletions": 1,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "f9c14e1dbef08f58": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "027d939b-e1a9-4016-a42f-2bca019388a2",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    }
+  }
+}
