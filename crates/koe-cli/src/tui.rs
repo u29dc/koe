@@ -1034,13 +1034,14 @@ fn render_footer(frame: &mut ratatui::Frame, area: Rect, theme: &UiTheme, state:
         .map(|ms| format!("{:.1}", ms as f64 / 1000.0))
         .unwrap_or_else(|| "n/a".to_string());
     let metrics = format!(
-        "transcribe:{}:{} {transcribe_state} lag:{lag}s chunks:{}/{} frames:{}/{} segs:{}",
+        "transcribe:{}:{} {transcribe_state} lag:{lag}s chunks:{}/{} frames:{}/{} raw_drop:{} segs:{}",
         state.transcribe_mode,
         state.transcribe_provider,
         state.stats.chunks_emitted(),
         state.stats.chunks_dropped(),
         state.stats.frames_captured(),
         state.stats.frames_dropped(),
+        state.stats.raw_frames_dropped(),
         state.ledger.len(),
     );
 

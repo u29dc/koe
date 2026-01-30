@@ -82,7 +82,7 @@ struct RuntimeProfiles {
     cloud: ProviderConfig,
 }
 
-const RAW_AUDIO_QUEUE_CAP: usize = 4;
+const RAW_AUDIO_QUEUE_CAP: usize = 16;
 
 impl RuntimeProfiles {
     fn from_config(active: &str, local: &ProviderConfig, cloud: &ProviderConfig) -> Self {
@@ -365,12 +365,15 @@ fn main() {
 
     let raw_sink: Option<koe_core::process::RawAudioSink> = {
         let raw_tx = raw_tx.clone();
+        let stats_raw = stats.clone();
         Some(Box::new(move |source, frame| {
             let message = RawAudioMessage {
                 source,
                 samples: frame.samples_f32.clone(),
             };
-            let _ = raw_tx.try_send(message);
+            if raw_tx.try_send(message).is_err() {
+                stats_raw.inc_raw_frames_dropped();
+            }
         }))
     };
 

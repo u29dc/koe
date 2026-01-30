@@ -109,6 +109,7 @@ pub struct CaptureStats {
     pub frames_dropped: Arc<AtomicU64>,
     pub chunks_emitted: Arc<AtomicU64>,
     pub chunks_dropped: Arc<AtomicU64>,
+    pub raw_frames_dropped: Arc<AtomicU64>,
 }
 
 impl CaptureStats {
@@ -118,6 +119,7 @@ impl CaptureStats {
             frames_dropped: Arc::new(AtomicU64::new(0)),
             chunks_emitted: Arc::new(AtomicU64::new(0)),
             chunks_dropped: Arc::new(AtomicU64::new(0)),
+            raw_frames_dropped: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -137,6 +139,10 @@ impl CaptureStats {
         self.chunks_dropped.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn inc_raw_frames_dropped(&self) {
+        self.raw_frames_dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn frames_captured(&self) -> u64 {
         self.frames_captured.load(Ordering::Relaxed)
     }
@@ -151,6 +157,10 @@ impl CaptureStats {
 
     pub fn chunks_dropped(&self) -> u64 {
         self.chunks_dropped.load(Ordering::Relaxed)
+    }
+
+    pub fn raw_frames_dropped(&self) -> u64 {
+        self.raw_frames_dropped.load(Ordering::Relaxed)
     }
 }
 

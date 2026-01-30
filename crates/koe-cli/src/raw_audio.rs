@@ -4,16 +4,20 @@ use std::io::{BufWriter, Write};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 pub struct RawAudioWriter {
     file: BufWriter<std::fs::File>,
     system: VecDeque<f32>,
     mic: VecDeque<f32>,
     pending_flush_samples: usize,
+    last_system_at: Option<Instant>,
+    last_mic_at: Option<Instant>,
 }
 
 impl RawAudioWriter {
     const FLUSH_SAMPLES: usize = 48_000;
+    const MISSING_SOURCE_TIMEOUT: Duration = Duration::from_millis(500);
 
     pub fn new(file: std::fs::File) -> Self {
         Self {
@@ -21,23 +25,32 @@ impl RawAudioWriter {
             system: VecDeque::new(),
             mic: VecDeque::new(),
             pending_flush_samples: 0,
+            last_system_at: None,
+            last_mic_at: None,
         }
     }
 
     pub fn write_samples(&mut self, source: AudioSource, samples: &[f32]) -> std::io::Result<()> {
         match source {
-            AudioSource::System => self.system.extend(samples.iter().copied()),
-            AudioSource::Microphone => self.mic.extend(samples.iter().copied()),
+            AudioSource::System => {
+                self.system.extend(samples.iter().copied());
+                self.last_system_at = Some(Instant::now());
+            }
+            AudioSource::Microphone => {
+                self.mic.extend(samples.iter().copied());
+                self.last_mic_at = Some(Instant::now());
+            }
             AudioSource::Mixed => {
-                self.drain_buffers()?;
+                self.mix_available()?;
                 self.write_samples_inner(samples)?;
                 return Ok(());
             }
         }
-        self.drain_buffers()
+        self.mix_available()?;
+        self.drain_if_missing_source()
     }
 
-    fn drain_buffers(&mut self) -> std::io::Result<()> {
+    fn mix_available(&mut self) -> std::io::Result<()> {
         let mix_len = self.system.len().min(self.mic.len());
         for _ in 0..mix_len {
             let left = self.system.pop_front().unwrap_or(0.0);
@@ -45,18 +58,44 @@ impl RawAudioWriter {
             let mixed = ((left + right) * 0.5).clamp(-1.0, 1.0);
             self.write_sample(mixed)?;
         }
+        Ok(())
+    }
 
-        if self.mic.is_empty() {
-            while let Some(sample) = self.system.pop_front() {
-                self.write_sample(sample)?;
-            }
+    fn drain_if_missing_source(&mut self) -> std::io::Result<()> {
+        if self.system.is_empty()
+            && !self.mic.is_empty()
+            && self.source_timed_out(self.last_system_at)
+        {
+            self.drain_remaining_source(AudioSource::Microphone)?;
         }
-        if self.system.is_empty() {
-            while let Some(sample) = self.mic.pop_front() {
-                self.write_sample(sample)?;
-            }
+        if self.mic.is_empty() && !self.system.is_empty() && self.source_timed_out(self.last_mic_at)
+        {
+            self.drain_remaining_source(AudioSource::System)?;
         }
+        Ok(())
+    }
 
+    fn source_timed_out(&self, last_seen: Option<Instant>) -> bool {
+        match last_seen {
+            Some(at) => at.elapsed() > Self::MISSING_SOURCE_TIMEOUT,
+            None => true,
+        }
+    }
+
+    fn drain_remaining_source(&mut self, source: AudioSource) -> std::io::Result<()> {
+        match source {
+            AudioSource::System => {
+                while let Some(sample) = self.system.pop_front() {
+                    self.write_sample(sample)?;
+                }
+            }
+            AudioSource::Microphone => {
+                while let Some(sample) = self.mic.pop_front() {
+                    self.write_sample(sample)?;
+                }
+            }
+            AudioSource::Mixed => {}
+        }
         Ok(())
     }
 
@@ -64,6 +103,15 @@ impl RawAudioWriter {
         for sample in samples {
             self.write_sample(*sample)?;
         }
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> std::io::Result<()> {
+        self.mix_available()?;
+        self.drain_remaining_source(AudioSource::System)?;
+        self.drain_remaining_source(AudioSource::Microphone)?;
+        self.file.flush()?;
+        self.pending_flush_samples = 0;
         Ok(())
     }
 
@@ -92,6 +140,9 @@ impl SharedRawAudioWriter {
 
     pub fn set(&self, writer: Option<RawAudioWriter>) {
         if let Ok(mut guard) = self.inner.lock() {
+            if let Some(existing) = guard.as_mut() {
+                let _ = existing.flush();
+            }
             *guard = writer;
         }
     }
