@@ -276,6 +276,7 @@ Phase 2: ASR + transcript ledger + TUI
         - Switch providers repeatedly during active audio capture. Ensure the worker restarts cleanly and the UI status updates. This test should not leak threads or leave the provider in a half-initialized state.
     - [ ] Toggle transcript pane repeatedly without layout glitches.
         - Verify the notes pane remains stable and the transcript pane cleanly hides/shows without resizing artifacts.
+        - BLOCKED: Manual UI toggle verification cannot be completed in this non-interactive environment; tried only code-level implementation; next steps: run `bun run koe`, press `t` repeatedly during active UI, confirm layout stability; file refs: `crates/koe-cli/src/tui.rs`.
 
 Phase 3: Notes engine (patch-only)
 
