@@ -2,6 +2,7 @@ use crate::TranscriptSegment;
 
 const MUTABLE_WINDOW_MS: i64 = 15_000;
 const SIMILARITY_THRESHOLD: f64 = 0.5;
+const MAX_SEGMENTS: usize = 2_000;
 
 /// Ordered ledger of transcript segments with overlap-aware deduplication.
 ///
@@ -71,6 +72,8 @@ impl TranscriptLedger {
                 seg.finalized = true;
             }
         }
+
+        self.prune_finalized(MAX_SEGMENTS);
     }
 
     /// Full transcript read.
@@ -100,6 +103,34 @@ impl TranscriptLedger {
     /// Whether the ledger is empty.
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
+    }
+
+    fn prune_finalized(&mut self, max_segments: usize) {
+        if self.segments.len() <= max_segments {
+            return;
+        }
+
+        let mut keep = Vec::with_capacity(max_segments);
+        for seg in &self.segments {
+            if !seg.finalized {
+                keep.push(seg.clone());
+            }
+        }
+
+        let remaining = max_segments.saturating_sub(keep.len());
+        if remaining == 0 {
+            self.segments = keep;
+            return;
+        }
+
+        let finalized: Vec<_> = self.segments.iter().filter(|seg| seg.finalized).collect();
+        let start = finalized.len().saturating_sub(remaining);
+        for seg in finalized[start..].iter() {
+            keep.push((*seg).clone());
+        }
+
+        keep.sort_by_key(|seg| seg.start_ms);
+        self.segments = keep;
     }
 }
 
@@ -255,5 +286,17 @@ mod tests {
         assert!(text_similarity("abcdef", "abcxyz") > 0.4); // prefix 3/6 = 0.5
         assert!(text_similarity("xyzabc", "qqqabc") > 0.4); // suffix 3/6 = 0.5
         assert!(text_similarity("hello", "goodbye") < SIMILARITY_THRESHOLD);
+    }
+
+    #[test]
+    fn prunes_old_finalized_segments() {
+        let mut ledger = TranscriptLedger::new();
+        let mut segments = Vec::new();
+        for i in 0..(MAX_SEGMENTS as u64 + 50) {
+            segments.push(seg(i, i as i64 * 10, i as i64 * 10 + 10, "hello"));
+        }
+        ledger.append(segments);
+        ledger.append(vec![seg(9999, 1_000_000, 1_000_010, "new")]);
+        assert!(ledger.len() <= MAX_SEGMENTS + 1);
     }
 }
