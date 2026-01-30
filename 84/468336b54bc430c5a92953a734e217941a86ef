@@ -1,0 +1,25 @@
+.gitignore
+  9ccc9d73d1e3e175 18
+package.json
+  9ccc9d73d1e3e175 6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.40",
+  "base_commit_sha": "84468336b54bc430c5a92953a734e217941a86ef",
+  "prompts": {
+    "9ccc9d73d1e3e175": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "41302d0d-9f1d-4e44-a662-e40541d2bab7",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 2,
+      "total_deletions": 2,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    }
+  }
+}
