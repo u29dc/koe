@@ -1,4 +1,5 @@
 use crate::config::UiConfig;
+use crate::session::SessionHandle;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use koe_core::process::AudioProcessor;
@@ -6,10 +7,10 @@ use koe_core::transcript::TranscriptLedger;
 use koe_core::types::{CaptureStats, MeetingState, TranscriptSegment};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use std::io;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::Duration;
@@ -83,6 +84,7 @@ pub fn run(
     asr_name: String,
     asr_cmd_tx: Sender<AsrCommand>,
     ui_config: UiConfig,
+    mut session: SessionHandle,
 ) -> Result<(), Box<dyn std::error::Error>> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -114,6 +116,9 @@ pub fn run(
     } else {
         ui_config.show_transcript
     };
+    let mut context = session.context().unwrap_or("").to_string();
+    let mut editing_context = false;
+    let mut context_buffer = String::new();
 
     loop {
         // Drain all pending transcript updates
@@ -183,6 +188,27 @@ pub fn run(
                 frame.render_widget(notes, transcript_area);
             }
 
+            if editing_context {
+                let area = centered_rect(70, 60, frame.area());
+                frame.render_widget(Clear, area);
+                let title = Span::styled(
+                    "Context (Ctrl+S save, Esc cancel)",
+                    Style::default().fg(theme.heading),
+                );
+                let body = if context_buffer.is_empty() {
+                    Text::from(Line::from(Span::styled(
+                        "type context...",
+                        Style::default().fg(theme.muted),
+                    )))
+                } else {
+                    Text::from(context_buffer.clone())
+                };
+                let editor = Paragraph::new(body)
+                    .block(Block::default().borders(Borders::ALL).title(title))
+                    .wrap(Wrap { trim: false });
+                frame.render_widget(editor, area);
+            }
+
             let asr_status = if asr_connected { "ok" } else { "disconnected" };
             let lag_text = asr_lag_ms
                 .map(|ms| format!("{ms}ms"))
@@ -205,6 +231,32 @@ pub fn run(
         // Poll for input
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
+                if editing_context {
+                    match key.code {
+                        KeyCode::Esc => {
+                            editing_context = false;
+                            context_buffer.clear();
+                        }
+                        KeyCode::Enter => {
+                            context_buffer.push('\n');
+                        }
+                        KeyCode::Backspace => {
+                            context_buffer.pop();
+                        }
+                        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            context = context_buffer.clone();
+                            if let Err(err) = session.update_context(context_buffer.clone()) {
+                                eprintln!("context update failed: {err}");
+                            }
+                            editing_context = false;
+                        }
+                        KeyCode::Char(ch) => {
+                            context_buffer.push(ch);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 if key.code == KeyCode::Char('q')
                     || (key.code == KeyCode::Char('c')
                         && key.modifiers.contains(KeyModifiers::CONTROL))
@@ -217,6 +269,10 @@ pub fn run(
                 if key.code == KeyCode::Char('t') {
                     show_transcript = !show_transcript;
                     needs_render = true;
+                }
+                if key.code == KeyCode::Char('c') {
+                    editing_context = true;
+                    context_buffer = context.clone();
                 }
             }
         }
@@ -342,4 +398,22 @@ fn speaker_style(theme: &UiTheme, speaker: &str) -> Style {
         "Them" => Style::default().fg(theme.them),
         _ => Style::default().fg(theme.muted),
     }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let [_, middle, _] = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .areas(area);
+
+    let [_, center, _] = Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .areas(middle);
+
+    center
 }

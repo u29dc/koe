@@ -1,6 +1,7 @@
 mod config;
 mod config_cmd;
 mod init;
+mod session;
 mod tui;
 
 use clap::{Parser, Subcommand};
@@ -9,6 +10,7 @@ use koe_core::asr::{AsrProvider, create_asr};
 use koe_core::capture::create_capture;
 use koe_core::process::ChunkRecvTimeoutError;
 use koe_core::types::{AudioSource, CaptureStats};
+use session::SessionHandle;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -47,6 +49,10 @@ struct RunArgs {
     /// Summarizer model. ollama: model tag [default: qwen3:30b-a3b], openrouter: model id [default: google/gemini-2.5-flash]
     #[arg(long)]
     model_sum: Option<String>,
+
+    /// Meeting context to pass to summarizer and session metadata
+    #[arg(long)]
+    context: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +61,7 @@ struct ResolvedRunArgs {
     model_trn: Option<String>,
     summarizer: String,
     model_sum: Option<String>,
+    context: Option<String>,
 }
 
 impl RunArgs {
@@ -77,12 +84,17 @@ impl RunArgs {
 
         let model_trn = self.model_trn.or(config_model_trn);
         let model_sum = self.model_sum.or(config_model_sum);
+        let context = self.context.or_else(|| {
+            let value = config.session.context.clone();
+            if value.is_empty() { None } else { Some(value) }
+        });
 
         ResolvedRunArgs {
             asr,
             model_trn,
             summarizer,
             model_sum,
+            context,
         }
     }
 }
@@ -179,6 +191,13 @@ fn main() {
     };
 
     let asr_name = asr.name().to_string();
+    let session = match create_session(&paths, &run, &whisper_model, &groq_model) {
+        Ok(session) => session,
+        Err(err) => {
+            eprintln!("session init failed: {err}");
+            std::process::exit(1);
+        }
+    };
     let (ui_tx, ui_rx) = mpsc::channel();
     let (asr_cmd_tx, asr_cmd_rx) = mpsc::channel();
 
@@ -288,6 +307,7 @@ fn main() {
         asr_name,
         asr_cmd_tx,
         config.ui.clone(),
+        session,
     ) {
         eprintln!("tui error: {e}");
         std::process::exit(1);
@@ -376,6 +396,28 @@ fn apply_config_env(config: &Config, run: &ResolvedRunArgs) {
         }
     }
     let _ = &run.model_sum;
+}
+
+fn create_session(
+    paths: &ConfigPaths,
+    run: &ResolvedRunArgs,
+    whisper_model: &Option<String>,
+    groq_model: &Option<String>,
+) -> Result<SessionHandle, session::SessionError> {
+    let asr_model = match run.asr.as_str() {
+        "whisper" => whisper_model.clone().unwrap_or_default(),
+        "groq" => groq_model.clone().unwrap_or_default(),
+        _ => String::new(),
+    };
+    let summarizer_model = run.model_sum.clone().unwrap_or_default();
+    let metadata = session::SessionMetadata::new(
+        run.context.clone(),
+        run.asr.clone(),
+        asr_model,
+        run.summarizer.clone(),
+        summarizer_model,
+    )?;
+    session::SessionHandle::start(paths, metadata)
 }
 
 #[cfg(test)]
