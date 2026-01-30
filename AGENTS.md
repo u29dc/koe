@@ -1,16 +1,50 @@
 # KOE
 
-## Architecture
+Real-time meeting transcription and notes engine for macOS, built in Rust with ScreenCaptureKit audio capture, VAD-gated chunking, local/cloud ASR (whisper-rs/Groq), and LLM-powered patch-based summarization (Ollama/OpenRouter), rendered in a ratatui TUI.
 
-Ideal maintainable architecture (core-first, UI-agnostic):
+## 1. Repository Structure
 
-- Workspace layout: `crates/koe-core` (engine) + `crates/koe-cli` (current TUI/CLI shell).
-- `koe-core` exposes a stable event stream and command API with zero UI dependencies.
-- `koe-cli` is a thin adapter that renders core events to a TUI and forwards user commands back to the core.
-- Future macOS Swift UI can replace `koe-cli` by embedding or IPC to `koe-core` without touching engine logic.
-- All providers (ASR, summarizer) and capture backends live behind traits in `koe-core`.
+```
+koe/
+  Cargo.toml              # workspace root (resolver = "3")
+  package.json            # bun scripts for quality gates (format, lint, test)
+  biome.json              # extends ~/.config/biome/biome.json
+  commitlint.config.js    # conventional commits, scopes: core|cli|web|config|deps
+  lint-staged.config.js   # runs bun run util:check
+  rustfmt.toml            # Rust formatting rules
+  .husky/                 # pre-commit (lint-staged), commit-msg (commitlint)
+  crates/
+    koe-core/             # engine: capture, processing, ASR, transcript, notes
+    koe-cli/              # thin TUI shell: renders core events, forwards commands
+```
 
-End-to-end data flow:
+## 2. Stack
+
+| Layer            | Choice                                         | Notes                                |
+| ---------------- | ---------------------------------------------- | ------------------------------------ |
+| Language         | Rust 2024 edition                              | rust-version 1.85                    |
+| Audio capture    | screencapturekit 1.5.0                         | macOS 15+, system audio + mic        |
+| Ring buffer      | rtrb 0.3.2                                     | lock-free SPSC for RT callbacks      |
+| Resampling       | rubato 0.16.2                                  | 48k -> 16k high-quality              |
+| VAD              | voice_activity_detector 0.2.1                  | Silero ONNX, 512 samples/32ms frames |
+| Local ASR        | whisper-rs 0.15.1                              | Metal acceleration                   |
+| Cloud ASR        | Groq API                                       | Whisper large-v3-turbo via ureq      |
+| Local summarizer | Ollama                                         | NDJSON streaming via ureq            |
+| Cloud summarizer | OpenRouter API                                 | via ureq                             |
+| TUI              | ratatui 0.30.0 + crossterm 0.29.0              |                                      |
+| CLI              | clap 4.5.56                                    | derive features                      |
+| HTTP             | ureq 3.1.4                                     | json + multipart features            |
+| Serialization    | serde 1.0.228 + serde_json 1.0.149             |                                      |
+| Errors           | thiserror 2.0.18                               |                                      |
+| Signals          | signal-hook 0.3.18                             |                                      |
+| macOS FFI        | core-foundation 0.10.1                         |                                      |
+| Quality gates    | bun + biome + commitlint + husky + lint-staged |                                      |
+
+## 3. Architecture
+
+Workspace layout: `crates/koe-core` (engine, zero UI deps) + `crates/koe-cli` (thin TUI adapter rendering core events and forwarding commands back); future macOS Swift UI replaces CLI via IPC to core without touching engine logic; all providers and capture backends live behind traits in koe-core.
+
+Data flow:
 
 ```
 ScreenCaptureKit (system audio + mic)
@@ -23,85 +57,29 @@ ScreenCaptureKit (system audio + mic)
               -> TUI (transcript + notes + status)
 ```
 
-Component responsibilities:
+Component responsibilities: ScreenCaptureKit adapter (enumerate content, configure stream, deliver audio buffers), RT callback (copy samples into ring buffer and return immediately), audio processor (timestamp alignment, optional mix, resample to 16 kHz mono), VAD + chunker (detect speech, emit bounded overlapped chunks), ASR provider (transcribe chunks into timestamped segments), transcript ledger (merge overlaps, keep last N seconds mutable, finalize older segments), notes engine (produce patch ops, apply to stable meeting state), TUI (render transcript/notes, show lag/drops/provider status, handle hotkeys).
 
-- ScreenCaptureKit adapter: enumerate content, configure stream, deliver audio buffers.
-- RT callback: copy samples into ring buffer and return immediately.
-- Audio processor: timestamp alignment, optional mix, resample to 16 kHz mono.
-- VAD + chunker: detect speech and emit bounded, overlapped chunks.
-- ASR provider: transcribe chunks into timestamped segments.
-- Transcript ledger: merge overlaps, keep last N seconds mutable, finalize older segments.
-- Notes engine: produce patch ops and apply to stable meeting state.
-- TUI: render transcript/notes, show lag/drops/provider status, handle hotkeys.
+Threading model: ScreenCaptureKit dispatch queue -> SPSC ring buffer (`rtrb::RingBuffer<f32>`) per stream; audio processor thread drains ring buffers and emits chunks; chunk queue via `std::sync::mpsc::sync_channel<AudioChunk>` (cap 4, drop-oldest); ASR worker thread reads chunks and outputs segments on `std::sync::mpsc::channel<TranscriptEvent>`; notes thread ticks on interval/trigger and outputs `NotesPatch` on `std::sync::mpsc::channel<NotesPatch>`; UI thread (ratatui) consumes events from a single merged channel.
 
-Threading model and channel types:
+Event/command surface: `CoreEvent` (transcript updates, finalized segment IDs, notes patches, provider status, stats, errors), `CoreCommand` (start/stop, provider switch, force summarize, export, pause/resume); transport is in-process channels for koe-cli, NDJSON over stdout or Unix socket for future Swift UI.
 
-- ScreenCaptureKit dispatch queue -> SPSC ring buffer (`rtrb::RingBuffer<f32>`) per stream.
-- Audio processor thread drains ring buffers and emits chunks.
-- Chunk queue: `std::sync::mpsc::sync_channel<AudioChunk>` (cap 4, drop-oldest).
-- ASR worker thread reads chunks, outputs segments on `std::sync::mpsc::channel<TranscriptEvent>`.
-- Notes thread ticks on interval/trigger; outputs `NotesPatch` on `std::sync::mpsc::channel<NotesPatch>`.
-- UI thread (ratatui) consumes events from a single merged channel.
+## 4. Technical Decisions
 
-Event and command surface between core and UI shells:
+Platform: macOS 15+ only, latest ScreenCaptureKit APIs, no legacy fallback paths; permissions require Screen Recording (system audio) and Microphone, both typically need process restart after grant.
 
-- `CoreEvent`: transcript updates, finalized segment IDs, notes patches, provider status, stats, errors.
-- `CoreCommand`: start/stop, provider switch, force summarize, export, pause/resume.
-- Transport: in-process channels for `koe-cli`; NDJSON over stdout or a Unix socket for future Swift UI.
+Audio capture: ScreenCaptureKit with content filter `captures_audio=true`, default audio-only output, fallback flag for tiny video output if needed for callbacks; microphone via ScreenCaptureKit only (macOS 15+), no cpal.
 
-## Technical Decisions
+Chunking/VAD: Silero VAD frame size 512 samples at 16 kHz (32 ms), threshold 0.5, min speech 200 ms, hangover 300 ms; chunking target 4.0 s windows, 1.0 s overlap, min 2.0 s, max 6.0 s.
 
-Platform scope:
+Backpressure: ring buffer 10 s per stream, chunk queue cap 4 drop-oldest, notes queue cap 1 skip-if-busy; favors freshness and UI responsiveness.
 
-- Target macOS 15+ only (latest versions), no legacy fallback paths.
-- Use latest ScreenCaptureKit APIs and features.
+Notes stability: patch-based updates with stable IDs (add/update ops only), summarizer uses finalized segments only, tentative notes marked when referencing mutable evidence, update cadence every 10 s or on keyword triggers (decision/action phrases).
 
-Audio capture (ScreenCaptureKit):
+Speaker labeling: stream-based attribution (mic -> "Me", system -> "Them"), mixed stream labeled "Unknown"; most reliable low-latency option without diarization overhead.
 
-- Use ScreenCaptureKit audio capture with a normal content filter and `captures_audio=true`.
-- Default to audio-only output (no screen frames attached).
-- Provide a fallback flag to attach a tiny video output if a user’s system requires it for audio callbacks.
-- Microphone capture via ScreenCaptureKit only (macOS 15+), no `cpal`.
-- Permissions: Screen Recording (system audio) and Microphone; both typically require process restart after grant.
-
-Chunking and VAD:
-
-- Use Silero VAD (voice_activity_detector) for higher quality speech detection.
-- Frame size: 512 samples at 16 kHz (32 ms).
-- Threshold: 0.5 probability; min speech 200 ms; hangover 300 ms.
-- Chunking: target 4.0 s windows, 1.0 s overlap, min 2.0 s, max 6.0 s.
-- Rationale: balances latency, accuracy at boundaries, and cost per ASR call.
-
-Backpressure:
-
-- Ring buffer capacity: 10 s per stream (system and mic).
-- Chunk queue capacity: 4; drop oldest pending chunk on overflow.
-- Notes queue capacity: 1; skip cycle if busy.
-- Policy favors freshness and UI responsiveness.
-
-Notes stability:
-
-- Patch-based updates with stable IDs (add/update ops only).
-- Summarizer uses finalized segments only; notes referencing mutable evidence are marked tentative.
-- Notes update cadence: every 10 s or keyword triggers (decision/action phrases).
-
-Providers (day one):
-
-- ASR: local whisper-rs (Metal) and Groq cloud (Whisper large-v3-turbo).
-- Summarizer: local Ollama and OpenRouter cloud.
-- CLI flags switch providers without restart; status bar shows active providers and latency stats.
-
-Speaker labeling:
-
-- Use stream-based attribution: mic stream -> "Me", system stream -> "Them".
-- This is the most reliable low-latency option without diarization overhead.
-- Mixed stream mode is optional and labeled "Unknown".
-
-## Interfaces
+## 5. Interfaces
 
 ```rust
-// Rust 2024 edition idioms (async in traits is stable).
-
 pub struct AudioFrame {
     pub pts_ns: i128,
     pub sample_rate_hz: u32,
@@ -109,11 +87,7 @@ pub struct AudioFrame {
     pub samples_f32: Vec<f32>,
 }
 
-pub enum AudioSource {
-    System,
-    Microphone,
-    Mixed,
-}
+pub enum AudioSource { System, Microphone, Mixed }
 
 pub struct AudioChunk {
     pub source: AudioSource,
@@ -137,19 +111,8 @@ pub struct MeetingState {
     pub decisions: Vec<NoteItem>,
 }
 
-pub struct NoteItem {
-    pub id: String,
-    pub text: String,
-    pub evidence: Vec<u64>,
-}
-
-pub struct ActionItem {
-    pub id: String,
-    pub text: String,
-    pub owner: Option<String>,
-    pub due: Option<String>,
-    pub evidence: Vec<u64>,
-}
+pub struct NoteItem { pub id: String, pub text: String, pub evidence: Vec<u64> }
+pub struct ActionItem { pub id: String, pub text: String, pub owner: Option<String>, pub due: Option<String>, pub evidence: Vec<u64> }
 
 pub enum NotesOp {
     AddKeyPoint { id: String, text: String, evidence: Vec<u64> },
@@ -158,14 +121,8 @@ pub enum NotesOp {
     UpdateAction { id: String, owner: Option<String>, due: Option<String> },
 }
 
-pub struct NotesPatch {
-    pub ops: Vec<NotesOp>,
-}
-
-pub enum SummarizerEvent {
-    DraftToken(String),
-    PatchReady(NotesPatch),
-}
+pub struct NotesPatch { pub ops: Vec<NotesOp> }
+pub enum SummarizerEvent { DraftToken(String), PatchReady(NotesPatch) }
 
 pub trait AudioCapture: Send {
     fn start(&mut self) -> Result<(), CaptureError>;
@@ -181,58 +138,28 @@ pub trait AsrProvider: Send {
 
 pub trait SummarizerProvider: Send {
     fn name(&self) -> &'static str;
-    fn summarize(
-        &mut self,
-        recent_segments: &[TranscriptSegment],
-        state: &MeetingState,
-        on_event: &mut dyn FnMut(SummarizerEvent),
-    ) -> Result<(), SummarizerError>;
+    fn summarize(&mut self, recent_segments: &[TranscriptSegment], state: &MeetingState, on_event: &mut dyn FnMut(SummarizerEvent)) -> Result<(), SummarizerError>;
 }
 ```
 
-## Dependencies
+## 6. Commands
 
-Minimal Cargo.toml (latest versions, MVP):
+| Command                 | Description                                                          |
+| ----------------------- | -------------------------------------------------------------------- |
+| `bun run build`         | `cargo build --workspace --release`                                  |
+| `bun run koe -- [args]` | `cargo run -p koe-cli -- [args]`                                     |
+| `bun run util:format`   | `cargo fmt --all`                                                    |
+| `bun run util:lint`     | `cargo clippy --all-targets --all-features -- -D warnings`           |
+| `bun run util:test`     | `cargo test --all`                                                   |
+| `bun run util:check`    | runs format + lint + test sequentially, exits nonzero on any failure |
 
-```toml
-[package]
-name = "koe"
-version = "0.1.0"
-edition = "2024"
+## 7. Quality
 
-[dependencies]
-screencapturekit = { version = "1.5.0", features = ["macos_26_0"] }
-rtrb = "0.3.2"
-rubato = "0.16.2"
-voice_activity_detector = "0.2.1"
-whisper-rs = { version = "0.15.1", features = ["metal"] }
-ratatui = "0.30.0"
-crossterm = "0.29.0"
-ureq = { version = "3.1.4", features = ["json"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
-thiserror = "2.0.18"
-clap = { version = "4.5.56", features = ["derive"] }
+Zero clippy warnings (`-D warnings`), `cargo fmt --all` enforced, all tests passing, pre-commit hooks run full `util:check` via lint-staged, commitlint enforces conventional commits with domain scopes (core, cli, web, config, deps).
 
-[target.'cfg(target_os = "macos")'.dependencies]
-core-foundation = "0.10.1"
-```
+Testing strategy: unit tests for VAD state machine and chunk boundary logic, transcript ledger overlap merge and finalize logic, NotesPatch apply and stable ID handling; integration tests feed canned WAV chunks through chunker -> ASR mock -> ledger and summarizer mock returns patch with state application; manual QA for permissions prompts, restart behavior, capture correctness, and 30-min long-running session stability.
 
-Justifications:
-
-- screencapturekit: ScreenCaptureKit bindings for system audio + mic (macOS 15+).
-- rtrb: lock-free SPSC ring buffer for RT-safe audio callbacks.
-- rubato: high-quality 48k -> 16k resampling.
-- voice_activity_detector: Silero VAD for accurate speech detection (ONNX-based).
-- whisper-rs: local Whisper inference with Metal acceleration.
-- ratatui/crossterm: TUI rendering and input handling.
-- ureq: simple blocking HTTP for Groq/OpenRouter and Ollama NDJSON/SSE.
-- serde/serde_json: patch ops and config serialization.
-- thiserror: clean error enums.
-- clap: CLI flags for provider selection and tuning.
-- core-foundation: macOS FFI helpers used by ScreenCaptureKit.
-
-## Build Phases
+## 8. Roadmap
 
 Phase 0: Quality gate wiring
 
@@ -343,27 +270,6 @@ Phase 4: Latency comparison + polish
     - [ ] Export produces valid transcript.md and notes.json.
         - Validate the output format with a simple parser or quick manual check. Ensure files include metadata like timestamps or session ID if desired. Confirm the export does not include partial or duplicated entries.
 
-## Testing Strategy
+## 9. Resolved Decisions
 
-- Unit tests:
-    - VAD state machine and chunk boundary logic.
-    - Transcript ledger overlap merge and finalize logic.
-    - NotesPatch apply and stable ID handling.
-- Integration tests:
-    - Feed canned WAV chunks through chunker -> ASR mock -> ledger.
-    - Summarizer mock returns patch; state applies correctly.
-- Manual QA (required):
-    - Permissions prompts, restart behavior, and capture correctness.
-    - Long-running session (30 min) for drop/lag stability.
-
-## Quality Gates and Commands
-
-- `bun run util:check` runs: `cargo fmt --all`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all`.
-- Run `bun run util:check` after each major phase and before every commit.
-
-## Resolved Decisions
-
-- macOS target: 15+ only (latest versions).
-- VAD: Silero VAD for quality, with tuned parameters above.
-- Providers: local + cloud for ASR and summarization from day one.
-- Speaker labeling: stream-based (mic -> Me, system -> Them).
+macOS 15+ only (no legacy), Silero VAD for quality with tuned parameters, local + cloud providers for ASR and summarization from day one, stream-based speaker labeling (mic -> Me, system -> Them).
