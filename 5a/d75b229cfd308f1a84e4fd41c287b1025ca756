@@ -1,0 +1,23 @@
+package.json
+  5b9c5b91f385690e 16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.40",
+  "base_commit_sha": "5ad75b229cfd308f1a84e4fd41c287b1025ca756",
+  "prompts": {
+    "5b9c5b91f385690e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "698a4c7f-a0c5-4ad2-828c-b4383d4685d2",
+        "model": "claude-opus-4-5-20251101"
+      },
+      "human_author": "Han <han@u29dc.com>",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 1,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }
+  }
+}
