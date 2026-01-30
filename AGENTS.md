@@ -295,7 +295,7 @@ Phase 3: Notes engine (patch-only)
         - Output must be concise, avoid filler, and emit only key points/actions/decisions. Prefer short noun phrases over full sentences.
     - [x] Notes capture speaker attribution when available (Me vs Them) with consistent labels.
         - Use stable labels (“Me”, “Them”) and keep the label prefix minimal (e.g., `Me:`) so notes stay compact.
-    - [ ] Notes pane updates incrementally in real time without full redraws.
+    - [x] Notes pane updates incrementally in real time without full redraws.
         - Patch application updates the data model and the UI only re-renders the visible notes list; maintain ordering and avoid flicker.
     - [ ] OpenRouter role infrastructure uses a stable system prompt and config-driven model selection.
         - System prompt must enforce patch-only JSON output and concise summaries; model and API key come from config, not env vars.
