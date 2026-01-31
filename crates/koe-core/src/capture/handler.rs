@@ -20,6 +20,7 @@ struct AudioProducer {
     samples: rtrb::Producer<f32>,
     pts: rtrb::Producer<(i128, usize)>,
     mono_scratch: Vec<f32>,
+    aligned_scratch: Vec<f32>,
 }
 
 /// RT-safe ScreenCaptureKit output handler.
@@ -46,6 +47,7 @@ pub fn create_output_handlers(
             samples: sys_samples_prod,
             pts: sys_pts_prod,
             mono_scratch: Vec::with_capacity(RING_CAPACITY),
+            aligned_scratch: Vec::with_capacity(RING_CAPACITY),
         }),
         stats: stats.clone(),
         target: SCStreamOutputType::Audio,
@@ -55,6 +57,7 @@ pub fn create_output_handlers(
             samples: mic_samples_prod,
             pts: mic_pts_prod,
             mono_scratch: Vec::with_capacity(RING_CAPACITY),
+            aligned_scratch: Vec::with_capacity(RING_CAPACITY),
         }),
         stats,
         target: SCStreamOutputType::Microphone,
@@ -103,16 +106,22 @@ impl SCStreamOutputTrait for OutputHandler {
                 continue;
             }
 
-            // Audio data is f32, possibly interleaved
-            let f32_count = raw_bytes.len() / std::mem::size_of::<f32>();
-            let f32_slice =
-                unsafe { std::slice::from_raw_parts(raw_bytes.as_ptr().cast::<f32>(), f32_count) };
+            if raw_bytes.len() % std::mem::size_of::<f32>() != 0 {
+                self.stats.inc_frames_dropped();
+                return;
+            }
 
             let AudioProducer {
                 samples: samples_prod,
                 pts: pts_prod,
                 mono_scratch,
+                aligned_scratch,
             } = &mut *producer;
+
+            let Some(f32_slice) = bytes_to_f32(raw_bytes, aligned_scratch) else {
+                self.stats.inc_frames_dropped();
+                return;
+            };
 
             let samples = match downmix_to_mono(f32_slice, channels, mono_scratch) {
                 Some(samples) => samples,
@@ -159,6 +168,43 @@ impl SCStreamOutputTrait for OutputHandler {
     }
 }
 
+fn bytes_to_f32<'a>(bytes: &'a [u8], scratch: &'a mut Vec<f32>) -> Option<&'a [f32]> {
+    if bytes.is_empty() {
+        return Some(&[]);
+    }
+
+    let sample_size = std::mem::size_of::<f32>();
+    if !bytes.len().is_multiple_of(sample_size) {
+        return None;
+    }
+
+    let aligned = (bytes.as_ptr() as usize).is_multiple_of(std::mem::align_of::<f32>());
+    let count = bytes.len() / sample_size;
+
+    if aligned {
+        return Some(unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<f32>(), count) });
+    }
+
+    if count > scratch.capacity() {
+        return None;
+    }
+
+    scratch.clear();
+    scratch.resize(count, 0.0);
+    for (idx, slot) in scratch.iter_mut().enumerate().take(count) {
+        let base = idx * sample_size;
+        let chunk = [
+            bytes[base],
+            bytes[base + 1],
+            bytes[base + 2],
+            bytes[base + 3],
+        ];
+        *slot = f32::from_ne_bytes(chunk);
+    }
+
+    Some(&scratch[..])
+}
+
 fn downmix_to_mono<'a>(
     interleaved: &'a [f32],
     channels: usize,
@@ -202,7 +248,7 @@ fn downmix_to_mono<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::downmix_to_mono;
+    use super::{bytes_to_f32, downmix_to_mono};
 
     #[test]
     fn downmix_returns_input_for_mono() {
@@ -226,6 +272,43 @@ mod tests {
         let mut scratch = Vec::with_capacity(1);
         let input = [1.0, 3.0, 2.0, 4.0];
         assert!(downmix_to_mono(&input, 2, &mut scratch).is_none());
+        assert_eq!(scratch.capacity(), 1);
+    }
+
+    #[test]
+    fn bytes_to_f32_returns_aligned_slice() {
+        let input = vec![0.25_f32, -1.5_f32];
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                input.as_ptr().cast::<u8>(),
+                input.len() * std::mem::size_of::<f32>(),
+            )
+        };
+        let mut scratch = Vec::with_capacity(4);
+        let output = bytes_to_f32(bytes, &mut scratch).unwrap();
+        assert_eq!(output, input.as_slice());
+        assert!(scratch.is_empty());
+    }
+
+    #[test]
+    fn bytes_to_f32_handles_unaligned_input() {
+        let mut bytes = Vec::with_capacity(1 + 8);
+        bytes.push(0);
+        bytes.extend_from_slice(&1.0_f32.to_ne_bytes());
+        bytes.extend_from_slice(&2.0_f32.to_ne_bytes());
+        let mut scratch = Vec::with_capacity(2);
+        let output = bytes_to_f32(&bytes[1..], &mut scratch).unwrap();
+        assert_eq!(output, &[1.0_f32, 2.0_f32]);
+    }
+
+    #[test]
+    fn bytes_to_f32_refuses_to_allocate() {
+        let mut bytes = Vec::with_capacity(1 + 8);
+        bytes.push(0);
+        bytes.extend_from_slice(&1.0_f32.to_ne_bytes());
+        bytes.extend_from_slice(&2.0_f32.to_ne_bytes());
+        let mut scratch = Vec::with_capacity(1);
+        assert!(bytes_to_f32(&bytes[1..], &mut scratch).is_none());
         assert_eq!(scratch.capacity(), 1);
     }
 }
