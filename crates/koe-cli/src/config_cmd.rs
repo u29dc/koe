@@ -325,12 +325,6 @@ fn apply_set(config: &mut Config, assignment: &str) -> Result<(), ConfigError> {
         "session.export_dir" => {
             config.session.export_dir = value.to_string();
         }
-        "ui.show_transcript" => {
-            config.ui.show_transcript = parse_bool(value, key)?;
-        }
-        "ui.notes_only_default" => {
-            config.ui.notes_only_default = parse_bool(value, key)?;
-        }
         "ui.color_theme" => {
             config.ui.color_theme = value.to_string();
         }

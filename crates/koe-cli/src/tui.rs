@@ -11,7 +11,7 @@ use koe_core::types::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use std::io;
@@ -131,7 +131,7 @@ impl UiTheme {
 
     fn minimal() -> Self {
         Self {
-            accent: Color::Rgb(80, 200, 200),
+            accent: Color::Cyan,
             me: Color::Rgb(170, 170, 170),
             them: Color::Rgb(150, 150, 150),
             heading: Color::Rgb(140, 140, 140),
@@ -952,16 +952,13 @@ fn render_command_lines(
             .max(1);
         let padding = " ".repeat(gap);
         let spans = if is_selected {
+            let sel = Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::REVERSED);
             vec![
-                Span::styled(
-                    label.to_string(),
-                    Style::default().fg(Color::Black).bg(theme.accent),
-                ),
-                Span::styled(padding, Style::default().bg(theme.accent)),
-                Span::styled(
-                    category.to_string(),
-                    Style::default().fg(Color::Black).bg(theme.accent),
-                ),
+                Span::styled(label.to_string(), sel),
+                Span::styled(padding, sel),
+                Span::styled(category.to_string(), sel),
             ]
         } else {
             vec![

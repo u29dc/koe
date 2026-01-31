@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-const CONFIG_VERSION: u32 = 4;
+const CONFIG_VERSION: u32 = 5;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -241,16 +241,12 @@ pub struct SessionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
-    pub show_transcript: bool,
-    pub notes_only_default: bool,
     pub color_theme: String,
 }
 
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            show_transcript: true,
-            notes_only_default: false,
             color_theme: "minimal".to_string(),
         }
     }
@@ -625,7 +621,7 @@ api_key = ""
         assert_eq!(config.transcribe.local.provider, "whisper");
 
         let updated = fs::read_to_string(&paths.config_path).unwrap();
-        assert!(updated.contains("version = 4"));
+        assert!(updated.contains("version = 5"));
         assert!(updated.contains("[summarize.local]"));
     }
 
