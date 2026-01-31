@@ -360,6 +360,10 @@ Phase 8: Post-cleanup stability pass
     - [x] Export path resilient to long sessions; timeout behavior adjusted or async export status added.
 - Smoke tests:
     - [ ] Palette lists only start/end/new meeting, export, and session browse/open/copy actions.
+        - BLOCKED: Requires interactive TUI run to inspect palette contents; cannot run interactive session here; tried code-only verification; next steps: run `bun run koe`, open palette in each phase, confirm command list matches spec; file ref: `crates/koe-cli/src/tui.rs`.
     - [ ] Pausing capture during active meeting does not drop transcript/notes updates.
+        - BLOCKED: Requires live audio capture to verify transcript/notes continue while paused; cannot run audio capture here; tried code-only gating change; next steps: run `bun run koe`, start meeting, pause capture, confirm transcript/notes still update from in-flight chunks; file ref: `crates/koe-cli/src/tui.rs`.
     - [ ] Summarize runs multiple cycles without new transcript and produces no duplicate notes.
+        - BLOCKED: Requires live summarize provider over multiple cycles; cannot run external model or interactive session here; tried prompt/tests only; next steps: run `bun run koe`, allow summarize to run several intervals without new speech, confirm no duplicate notes; file refs: `crates/koe-core/src/summarize/patch.rs`, `crates/koe-cli/src/tui.rs`.
     - [ ] Export completes or reports async/pending for long sessions without blocking UI shutdown.
+        - BLOCKED: Requires long-running session export and UI shutdown timing; cannot run interactive capture here; tried only code-level timeout adjustment; next steps: run `bun run koe`, record long session, end meeting, confirm export completes or logs pending without blocking; file ref: `crates/koe-cli/src/tui.rs`.
