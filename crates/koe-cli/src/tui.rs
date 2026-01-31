@@ -1200,24 +1200,34 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
+enum ExportOutcome {
+    Completed,
+    Pending,
+}
+
 fn export_session_with_timeout(
     mut session: SessionHandle,
     segments: Vec<TranscriptSegment>,
     notes: MeetingNotes,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<ExportOutcome, Box<dyn std::error::Error>> {
     let (tx, rx) = channel();
     thread::spawn(move || {
         let result = session.export_on_exit(&segments, &notes);
         let _ = tx.send(result);
     });
 
-    match rx.recv_timeout(Duration::from_secs(2)) {
-        Ok(Ok(())) => Ok(()),
+    let timeout = Duration::from_secs(10);
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(())) => Ok(ExportOutcome::Completed),
         Ok(Err(err)) => Err(Box::new(err)),
-        Err(_) => {
-            eprintln!("export timed out after 2s");
-            Ok(())
+        Err(RecvTimeoutError::Timeout) => {
+            eprintln!(
+                "export still running after {}s; continuing in background",
+                timeout.as_secs()
+            );
+            Ok(ExportOutcome::Pending)
         }
+        Err(RecvTimeoutError::Disconnected) => Err("export thread disconnected".into()),
     }
 }
 
