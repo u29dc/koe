@@ -354,7 +354,7 @@ Phase 8: Post-cleanup stability pass
 
 - Done criteria:
     - [x] Command palette only supports meeting/session actions; remove config-related commands and handlers (no transcribe/summarize mode/model switches in TUI).
-    - [ ] Paused capture still applies transcript/notes events to UI and session persistence; pause only stops new capture input.
+    - [x] Paused capture still applies transcript/notes events to UI and session persistence; pause only stops new capture input.
     - [ ] CMSampleBuffer audio data alignment validated before unsafe cast; fallback path for unaligned buffers.
     - [ ] Summarize prompt includes existing notes/IDs to prevent duplicates; add tests for idempotency.
     - [ ] Export path resilient to long sessions; timeout behavior adjusted or async export status added.

@@ -284,7 +284,6 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let mut event_state = UiEventState {
             phase,
-            capture_paused,
             session: &mut session,
             ledger: &mut ledger,
             meeting_notes: &mut meeting_notes,
@@ -296,7 +295,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
             transcribe_lag_ms: &mut transcribe_lag_ms,
             theme: &theme,
         };
-        drain_ui_events(&ctx.ui_rx, &mut event_state, false);
+        drain_ui_events(&ctx.ui_rx, &mut event_state);
 
         if phase == MeetingPhase::MeetingActive
             && let Some(started) = meeting_started_at
@@ -432,7 +431,6 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                     processor.pause();
                                     let mut event_state = UiEventState {
                                         phase,
-                                        capture_paused,
                                         session: &mut session,
                                         ledger: &mut ledger,
                                         meeting_notes: &mut meeting_notes,
@@ -530,7 +528,6 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                     if needs_export {
                                         let mut event_state = UiEventState {
                                             phase,
-                                            capture_paused,
                                             session: &mut session,
                                             ledger: &mut ledger,
                                             meeting_notes: &mut meeting_notes,
@@ -618,7 +615,6 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
             processor.pause();
             let mut event_state = UiEventState {
                 phase,
-                capture_paused,
                 session: &mut session,
                 ledger: &mut ledger,
                 meeting_notes: &mut meeting_notes,
@@ -661,7 +657,6 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
 
 struct UiEventState<'a> {
     phase: MeetingPhase,
-    capture_paused: bool,
     session: &'a mut Option<SessionHandle>,
     ledger: &'a mut TranscriptLedger,
     meeting_notes: &'a mut MeetingNotes,
@@ -675,9 +670,8 @@ struct UiEventState<'a> {
 }
 
 impl<'a> UiEventState<'a> {
-    fn apply_event(&mut self, event: UiEvent, allow_when_paused: bool) {
-        let accept_updates = self.phase == MeetingPhase::MeetingActive
-            && (allow_when_paused || !self.capture_paused);
+    fn apply_event(&mut self, event: UiEvent) {
+        let accept_updates = self.phase == MeetingPhase::MeetingActive;
 
         match event {
             UiEvent::Transcript(segments) => {
@@ -737,14 +731,10 @@ impl<'a> UiEventState<'a> {
     }
 }
 
-fn drain_ui_events(
-    ui_rx: &Receiver<UiEvent>,
-    state: &mut UiEventState<'_>,
-    allow_when_paused: bool,
-) {
+fn drain_ui_events(ui_rx: &Receiver<UiEvent>, state: &mut UiEventState<'_>) {
     loop {
         match ui_rx.try_recv() {
-            Ok(event) => state.apply_event(event, allow_when_paused),
+            Ok(event) => state.apply_event(event),
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
                 *state.transcribe_connected = false;
@@ -778,7 +768,7 @@ fn drain_transcribe_with_timeout(
         }
 
         match ui_rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(event) => state.apply_event(event, true),
+            Ok(event) => state.apply_event(event),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 *state.transcribe_connected = false;
@@ -787,7 +777,7 @@ fn drain_transcribe_with_timeout(
         }
     }
 
-    drain_ui_events(ui_rx, state, true);
+    drain_ui_events(ui_rx, state);
 
     drained
 }
