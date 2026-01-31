@@ -1,5 +1,5 @@
-pub mod groq;
-pub mod whisper;
+pub mod cloud;
+pub mod local;
 
 use crate::{AudioChunk, TranscribeError, TranscriptSegment};
 
@@ -28,9 +28,9 @@ pub fn create_transcribe_provider(
                         .into(),
                 )
             })?;
-            Ok(Box::new(whisper::WhisperProvider::new(path)?))
+            Ok(Box::new(local::WhisperProvider::new(path)?))
         }
-        "groq" => Ok(Box::new(groq::GroqProvider::new(model, api_key)?)),
+        "groq" => Ok(Box::new(cloud::GroqProvider::new(model, api_key)?)),
         other => Err(TranscribeError::ModelLoad(format!(
             "unknown transcribe provider: {other}"
         ))),
