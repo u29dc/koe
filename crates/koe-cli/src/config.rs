@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-const CONFIG_VERSION: u32 = 3;
+const CONFIG_VERSION: u32 = 4;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -81,6 +81,7 @@ pub struct AudioConfig {
     pub channels: u16,
     pub sources: Vec<String>,
     pub microphone_device_id: String,
+    pub mixdown: MixdownConfig,
 }
 
 impl Default for AudioConfig {
@@ -90,6 +91,79 @@ impl Default for AudioConfig {
             channels: 1,
             sources: vec!["system".to_string(), "microphone".to_string()],
             microphone_device_id: String::new(),
+            mixdown: MixdownConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct MixdownConfig {
+    pub agc: AgcConfig,
+    pub denoise: DenoiseConfig,
+    pub high_pass: HighPassConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgcConfig {
+    pub enabled: bool,
+    pub target_rms_dbfs: f32,
+    pub max_gain_db: f32,
+    pub min_gain_db: f32,
+    pub attack_ms: u32,
+    pub release_ms: u32,
+    pub limiter_ceiling_dbfs: f32,
+}
+
+impl Default for AgcConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            target_rms_dbfs: -20.0,
+            max_gain_db: 12.0,
+            min_gain_db: -12.0,
+            attack_ms: 10,
+            release_ms: 250,
+            limiter_ceiling_dbfs: -1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DenoiseConfig {
+    pub enabled: bool,
+    pub threshold_dbfs: f32,
+    pub reduction_db: f32,
+    pub attack_ms: u32,
+    pub release_ms: u32,
+}
+
+impl Default for DenoiseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold_dbfs: -45.0,
+            reduction_db: 10.0,
+            attack_ms: 10,
+            release_ms: 200,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HighPassConfig {
+    pub enabled: bool,
+    pub cutoff_hz: f32,
+}
+
+impl Default for HighPassConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cutoff_hz: 100.0,
         }
     }
 }
@@ -289,6 +363,65 @@ impl Config {
                     )));
                 }
             }
+        }
+        let agc = &self.audio.mixdown.agc;
+        if agc.target_rms_dbfs > 0.0 {
+            return Err(ConfigError::Validation(
+                "audio.mixdown.agc.target_rms_dbfs must be at or below 0".into(),
+            ));
+        }
+        if agc.max_gain_db < agc.min_gain_db {
+            return Err(ConfigError::Validation(
+                "audio.mixdown.agc.max_gain_db must be >= min_gain_db".into(),
+            ));
+        }
+        if agc.attack_ms == 0 {
+            return Err(ConfigError::Validation(
+                "audio.mixdown.agc.attack_ms must be greater than 0".into(),
+            ));
+        }
+        if agc.release_ms == 0 {
+            return Err(ConfigError::Validation(
+                "audio.mixdown.agc.release_ms must be greater than 0".into(),
+            ));
+        }
+        if agc.limiter_ceiling_dbfs > 0.0 {
+            return Err(ConfigError::Validation(
+                "audio.mixdown.agc.limiter_ceiling_dbfs must be at or below 0".into(),
+            ));
+        }
+        let denoise = &self.audio.mixdown.denoise;
+        if denoise.threshold_dbfs > 0.0 {
+            return Err(ConfigError::Validation(
+                "audio.mixdown.denoise.threshold_dbfs must be at or below 0".into(),
+            ));
+        }
+        if denoise.reduction_db < 0.0 {
+            return Err(ConfigError::Validation(
+                "audio.mixdown.denoise.reduction_db must be non-negative".into(),
+            ));
+        }
+        if denoise.attack_ms == 0 {
+            return Err(ConfigError::Validation(
+                "audio.mixdown.denoise.attack_ms must be greater than 0".into(),
+            ));
+        }
+        if denoise.release_ms == 0 {
+            return Err(ConfigError::Validation(
+                "audio.mixdown.denoise.release_ms must be greater than 0".into(),
+            ));
+        }
+        let high_pass = &self.audio.mixdown.high_pass;
+        if high_pass.cutoff_hz <= 0.0 {
+            return Err(ConfigError::Validation(
+                "audio.mixdown.high_pass.cutoff_hz must be greater than 0".into(),
+            ));
+        }
+        let nyquist = self.audio.sample_rate as f32 / 2.0;
+        if high_pass.cutoff_hz >= nyquist {
+            return Err(ConfigError::Validation(
+                "audio.mixdown.high_pass.cutoff_hz must be below the Nyquist frequency".into(),
+            ));
         }
 
         if self.summarize.prompt_profile.trim().is_empty() {
@@ -492,7 +625,7 @@ api_key = ""
         assert_eq!(config.transcribe.local.provider, "whisper");
 
         let updated = fs::read_to_string(&paths.config_path).unwrap();
-        assert!(updated.contains("version = 3"));
+        assert!(updated.contains("version = 4"));
         assert!(updated.contains("[summarize.local]"));
     }
 

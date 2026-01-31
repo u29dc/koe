@@ -710,6 +710,8 @@ fn main() {
         transcribe_cmd_tx,
         summarize_cmd_tx,
         ui_config: config.ui.clone(),
+        audio_sample_rate_hz: config.audio.sample_rate,
+        audio_mixdown: config.audio.mixdown.clone(),
         session_factory,
         shared_writer,
         initial_context: run.context.clone().unwrap_or_default(),

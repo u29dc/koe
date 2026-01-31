@@ -1,4 +1,4 @@
-use crate::config::UiConfig;
+use crate::config::{MixdownConfig, UiConfig};
 use crate::raw_audio::{RawAudioWriter, SharedRawAudioWriter};
 use crate::session::{SessionFactory, SessionHandle};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -108,6 +108,8 @@ pub struct TuiContext {
     pub transcribe_cmd_tx: Sender<TranscribeCommand>,
     pub summarize_cmd_tx: Sender<SummarizeCommand>,
     pub ui_config: UiConfig,
+    pub audio_sample_rate_hz: u32,
+    pub audio_mixdown: MixdownConfig,
     pub session_factory: SessionFactory,
     pub shared_writer: SharedRawAudioWriter,
     pub initial_context: String,
@@ -248,6 +250,8 @@ struct StartMeetingInput<'a> {
     summarize_profiles: &'a ModeProfiles,
     context: &'a str,
     participants: &'a [String],
+    audio_sample_rate_hz: u32,
+    audio_mixdown: &'a MixdownConfig,
 }
 
 struct FooterState<'a> {
@@ -440,6 +444,8 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                         summarize_profiles: &summarize_profiles,
                                         context: &context,
                                         participants: &ctx.participants,
+                                        audio_sample_rate_hz: ctx.audio_sample_rate_hz,
+                                        audio_mixdown: &ctx.audio_mixdown,
                                     };
                                     if let Ok(new_session) = start_meeting(start_input) {
                                         session = Some(new_session);
@@ -657,6 +663,8 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                         summarize_profiles: &summarize_profiles,
                                         context: &context,
                                         participants: &ctx.participants,
+                                        audio_sample_rate_hz: ctx.audio_sample_rate_hz,
+                                        audio_mixdown: &ctx.audio_mixdown,
                                     };
                                     if let Ok(new_session) = start_meeting(start_input) {
                                         session = Some(new_session);
@@ -981,9 +989,11 @@ fn start_meeting(
         input.participants.to_vec(),
     )?;
     let audio_raw = session.open_audio_raw()?;
-    input
-        .shared_writer
-        .set(Some(RawAudioWriter::new(audio_raw)));
+    input.shared_writer.set(Some(RawAudioWriter::new(
+        audio_raw,
+        input.audio_sample_rate_hz,
+        input.audio_mixdown.clone(),
+    )));
     Ok(session)
 }
 

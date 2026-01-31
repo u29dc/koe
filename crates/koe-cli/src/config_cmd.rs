@@ -175,6 +175,48 @@ fn apply_set(config: &mut Config, assignment: &str) -> Result<(), ConfigError> {
         "audio.microphone_device_id" => {
             config.audio.microphone_device_id = value.to_string();
         }
+        "audio.mixdown.agc.enabled" => {
+            config.audio.mixdown.agc.enabled = parse_bool(value, key)?;
+        }
+        "audio.mixdown.agc.target_rms_dbfs" => {
+            config.audio.mixdown.agc.target_rms_dbfs = parse_f32(value, key)?;
+        }
+        "audio.mixdown.agc.max_gain_db" => {
+            config.audio.mixdown.agc.max_gain_db = parse_f32(value, key)?;
+        }
+        "audio.mixdown.agc.min_gain_db" => {
+            config.audio.mixdown.agc.min_gain_db = parse_f32(value, key)?;
+        }
+        "audio.mixdown.agc.attack_ms" => {
+            config.audio.mixdown.agc.attack_ms = parse_u32(value, key)?;
+        }
+        "audio.mixdown.agc.release_ms" => {
+            config.audio.mixdown.agc.release_ms = parse_u32(value, key)?;
+        }
+        "audio.mixdown.agc.limiter_ceiling_dbfs" => {
+            config.audio.mixdown.agc.limiter_ceiling_dbfs = parse_f32(value, key)?;
+        }
+        "audio.mixdown.denoise.enabled" => {
+            config.audio.mixdown.denoise.enabled = parse_bool(value, key)?;
+        }
+        "audio.mixdown.denoise.threshold_dbfs" => {
+            config.audio.mixdown.denoise.threshold_dbfs = parse_f32(value, key)?;
+        }
+        "audio.mixdown.denoise.reduction_db" => {
+            config.audio.mixdown.denoise.reduction_db = parse_f32(value, key)?;
+        }
+        "audio.mixdown.denoise.attack_ms" => {
+            config.audio.mixdown.denoise.attack_ms = parse_u32(value, key)?;
+        }
+        "audio.mixdown.denoise.release_ms" => {
+            config.audio.mixdown.denoise.release_ms = parse_u32(value, key)?;
+        }
+        "audio.mixdown.high_pass.enabled" => {
+            config.audio.mixdown.high_pass.enabled = parse_bool(value, key)?;
+        }
+        "audio.mixdown.high_pass.cutoff_hz" => {
+            config.audio.mixdown.high_pass.cutoff_hz = parse_f32(value, key)?;
+        }
         "transcribe.active" => {
             config.transcribe.active = value.to_string();
         }
@@ -353,6 +395,12 @@ fn parse_u16(value: &str, key: &str) -> Result<u16, ConfigError> {
     value
         .parse()
         .map_err(|_| ConfigError::Validation(format!("{key} expects an unsigned integer")))
+}
+
+fn parse_f32(value: &str, key: &str) -> Result<f32, ConfigError> {
+    value
+        .parse()
+        .map_err(|_| ConfigError::Validation(format!("{key} expects a number")))
 }
 
 fn parse_sources(value: &str) -> Result<Vec<String>, ConfigError> {

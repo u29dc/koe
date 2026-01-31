@@ -331,11 +331,11 @@ Phase 6: TUI design polish
 Phase 7: Audio quality improvements
 
 - Done criteria:
-    - [ ] Add optional loudness normalization and gentle AGC for recorded mixdown.
+    - [x] Add loudness normalization and gentle AGC for recorded mixdown.
         - Target consistent output level without clipping; ensure it can be disabled.
-    - [ ] Add optional noise reduction path for recorded audio.
+    - [x] Add optional noise reduction path for recorded audio.
         - Provide a lightweight denoise stage (e.g., RNNoise or spectral gating) with a conservative default.
-    - [ ] Add a simple high-pass filter to reduce rumble before mixdown/export.
+    - [x] Add a simple high-pass filter to reduce rumble before mixdown/export.
         - Keep cutoff low (e.g., 80–120 Hz) and configurable.
     - [x] Context-aware command sets driven by app state (`crates/koe-cli/src/tui.rs`).
         - Idle: start meeting, switch transcribe/summarize mode, set transcribe/summarize model, edit context, browse sessions.
