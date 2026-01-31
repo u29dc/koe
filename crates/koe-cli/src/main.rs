@@ -10,14 +10,15 @@ use config::{Config, ConfigPaths, ProviderConfig};
 use koe_core::capture::{CaptureConfig, create_capture, list_audio_inputs};
 use koe_core::process::ChunkRecvTimeoutError;
 use koe_core::summarize::create_summarize_provider;
+use koe_core::summarize::filter::{build_participant_tokens, normalize_text, should_keep_segment};
 use koe_core::transcribe::{TranscribeProvider, create_transcribe_provider};
 use koe_core::transcript::TranscriptLedger;
 use koe_core::types::{
     AudioSource, CaptureStats, MeetingNotes, NoteBullet, NotesOp, NotesPatch, SummarizeEvent,
-    TranscriptSegment,
 };
 use raw_audio::{RawAudioMessage, SharedRawAudioWriter, spawn_raw_audio_writer};
 use session::SessionFactory;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
@@ -394,11 +395,16 @@ fn main() {
         match thread::Builder::new()
             .name("koe-summarize".into())
             .spawn(move || {
-                const SUMMARIZE_INTERVAL: Duration = Duration::from_secs(10);
+                const SUMMARIZE_INTERVAL: Duration = Duration::from_secs(4);
+                const STABLE_WINDOW_MS: i64 = 4_000;
+                const TAIL_WINDOW_MS: i64 = 15_000;
+                const MAX_NOTES_FOR_PROMPT: usize = 50;
+                const MIN_NEW_WORDS: usize = 4;
 
                 let current_mode = summarize_profiles_runtime.active.clone();
                 let mut context = summarize_context;
                 let participants = summarize_participants;
+                let participant_tokens = build_participant_tokens(&participants);
                 let mut ledger = TranscriptLedger::new();
                 let mut meeting_notes = MeetingNotes::default();
                 let mut last_summary_at = Instant::now() - SUMMARIZE_INTERVAL;
@@ -446,15 +452,45 @@ fn main() {
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
 
-                    let new_segments: Vec<TranscriptSegment> = ledger
-                        .segments_since(last_summarized_id)
-                        .iter()
-                        .filter(|seg| seg.finalized)
-                        .cloned()
-                        .collect();
                     let due = Instant::now().duration_since(last_summary_at) >= SUMMARIZE_INTERVAL;
 
-                    if new_segments.is_empty() || !due {
+                    if !due {
+                        continue;
+                    }
+
+                    let highest_end_ms = ledger.highest_end_ms();
+                    let stable_cutoff = highest_end_ms - STABLE_WINDOW_MS;
+                    let tail_cutoff = highest_end_ms - TAIL_WINDOW_MS;
+                    let mut new_word_count = 0usize;
+                    let mut max_new_id = last_summarized_id;
+                    let mut has_new_segment = false;
+                    let mut segments_for_prompt = Vec::new();
+
+                    for seg in ledger.segments() {
+                        if seg.end_ms > stable_cutoff {
+                            continue;
+                        }
+                        let is_new = seg.id > last_summarized_id;
+                        let in_tail = seg.end_ms >= tail_cutoff;
+                        if !(is_new || in_tail) {
+                            continue;
+                        }
+                        if !should_keep_segment(&seg.text, &participant_tokens) {
+                            continue;
+                        }
+                        if is_new {
+                            has_new_segment = true;
+                            max_new_id = max_new_id.max(seg.id);
+                            new_word_count += seg.text.split_whitespace().count();
+                        }
+                        segments_for_prompt.push(seg.clone());
+                    }
+
+                    if !has_new_segment || new_word_count < MIN_NEW_WORDS {
+                        continue;
+                    }
+
+                    if segments_for_prompt.is_empty() {
                         continue;
                     }
 
@@ -469,10 +505,18 @@ fn main() {
                     } else {
                         Some(context.as_str())
                     };
+                    let notes_for_prompt = if meeting_notes.bullets.len() > MAX_NOTES_FOR_PROMPT {
+                        let start = meeting_notes.bullets.len() - MAX_NOTES_FOR_PROMPT;
+                        MeetingNotes {
+                            bullets: meeting_notes.bullets[start..].to_vec(),
+                        }
+                    } else {
+                        meeting_notes.clone()
+                    };
 
                     let result = provider.summarize(
-                        &new_segments,
-                        &meeting_notes,
+                        &segments_for_prompt,
+                        &notes_for_prompt,
                         context_ref,
                         &participants,
                         &mut |event| match event {
@@ -490,9 +534,7 @@ fn main() {
                                 apply_notes_patch_state(&mut meeting_notes, patch.clone());
                                 let _ = ui_tx_summarize.send(UiEvent::NotesPatch(patch));
                             }
-                            if let Some(last) = new_segments.last() {
-                                last_summarized_id = last.id;
-                            }
+                            last_summarized_id = max_new_id;
                         }
                         Err(e) => {
                             eprintln!("summarize error: {e}");
@@ -751,24 +793,89 @@ fn create_summarize_for_mode(
 
 fn apply_notes_patch_state(notes: &mut MeetingNotes, patch: NotesPatch) -> bool {
     let mut changed = false;
+    let mut existing_ids: HashSet<String> = notes
+        .bullets
+        .iter()
+        .map(|bullet| bullet.id.clone())
+        .collect();
+    let mut existing_normalized: HashSet<String> = notes
+        .bullets
+        .iter()
+        .map(|bullet| normalize_text(&bullet.text))
+        .collect();
 
     for op in patch.ops {
         match op {
             NotesOp::Add { id, text, evidence } => {
-                if notes
-                    .bullets
-                    .iter()
-                    .any(|bullet| bullet.id == id || bullet.text == text)
+                let normalized_text = normalize_text(&text);
+                if normalized_text.is_empty()
+                    || existing_ids.contains(&id)
+                    || existing_normalized.contains(&normalized_text)
+                    || is_near_duplicate(&normalized_text, &existing_normalized)
+                    || !has_min_content_words(&normalized_text)
                 {
                     continue;
                 }
-                notes.bullets.push(NoteBullet { id, text, evidence });
+                notes.bullets.push(NoteBullet {
+                    id: id.clone(),
+                    text,
+                    evidence,
+                });
+                existing_ids.insert(id);
+                existing_normalized.insert(normalized_text);
                 changed = true;
             }
         }
     }
 
     changed
+}
+
+fn is_near_duplicate(candidate: &str, existing: &HashSet<String>) -> bool {
+    let candidate_tokens = content_tokens(candidate);
+    if candidate_tokens.is_empty() {
+        return true;
+    }
+    let candidate_set: HashSet<&str> = candidate_tokens.iter().map(|t| t.as_str()).collect();
+    for existing_text in existing {
+        let existing_tokens = content_tokens(existing_text);
+        if existing_tokens.is_empty() {
+            continue;
+        }
+        let existing_set: HashSet<&str> = existing_tokens.iter().map(|t| t.as_str()).collect();
+        let overlap = candidate_set.intersection(&existing_set).count();
+        let union = candidate_set.len() + existing_set.len() - overlap;
+        if union == 0 {
+            continue;
+        }
+        let jaccard = overlap as f32 / union as f32;
+        if jaccard >= 0.75 || overlap >= 5 {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_min_content_words(normalized: &str) -> bool {
+    content_tokens(normalized).len() >= 5
+}
+
+fn content_tokens(normalized: &str) -> Vec<String> {
+    normalized
+        .split_whitespace()
+        .filter(|token| !is_stopword(token))
+        .map(|token| token.to_string())
+        .collect()
+}
+
+fn is_stopword(token: &str) -> bool {
+    const STOPWORDS: [&str; 28] = [
+        "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "has", "have", "if",
+        "in", "is", "it", "its", "of", "on", "or", "that", "the", "to", "was", "were", "with",
+        "will",
+    ];
+
+    STOPWORDS.contains(&token)
 }
 
 #[cfg(test)]
