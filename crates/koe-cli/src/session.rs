@@ -165,7 +165,6 @@ pub struct SessionHandle {
     dir: PathBuf,
     export_dir: Option<PathBuf>,
     metadata_path: PathBuf,
-    context_path: PathBuf,
     metadata: SessionMetadata,
 }
 
@@ -202,7 +201,6 @@ impl SessionHandle {
             dir,
             export_dir,
             metadata_path,
-            context_path,
             metadata,
         })
     }
@@ -285,14 +283,6 @@ impl SessionHandle {
         let payload = serde_json::to_string_pretty(&snapshot)?;
         write_atomic(&self.notes_path(), payload.as_bytes())?;
         self.touch_metadata()?;
-        Ok(())
-    }
-
-    pub fn update_context(&mut self, context: String) -> Result<(), SessionError> {
-        self.metadata.context = Some(context.clone());
-        self.metadata.last_update = OffsetDateTime::now_utc().format(&Rfc3339)?;
-        write_atomic(&self.context_path, context.as_bytes())?;
-        write_metadata(&self.metadata_path, &self.metadata)?;
         Ok(())
     }
 

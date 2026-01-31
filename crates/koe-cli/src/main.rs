@@ -113,14 +113,6 @@ impl RuntimeProfiles {
             &self.local
         }
     }
-
-    fn profile_for_mode_mut(&mut self, mode: &str) -> &mut ProviderConfig {
-        if mode == "cloud" {
-            &mut self.cloud
-        } else {
-            &mut self.local
-        }
-    }
 }
 
 impl RunArgs {
@@ -393,8 +385,8 @@ fn main() {
     let (summarize_tx_transcribe, summarize_rx) = mpsc::sync_channel(1);
     let ui_tx_summarize = ui_tx.clone();
     let ui_tx_transcribe = ui_tx.clone();
-    let mut transcribe_profiles_runtime = run.transcribe_profiles.clone();
-    let mut summarize_profiles_runtime = run.summarize_profiles.clone();
+    let transcribe_profiles_runtime = run.transcribe_profiles.clone();
+    let summarize_profiles_runtime = run.summarize_profiles.clone();
     let summarize_context = run.context.clone().unwrap_or_default();
     let summarize_participants = run.participants.clone();
 
@@ -404,14 +396,13 @@ fn main() {
             .spawn(move || {
                 const SUMMARIZE_INTERVAL: Duration = Duration::from_secs(10);
 
-                let mut current_mode = summarize_profiles_runtime.active.clone();
+                let current_mode = summarize_profiles_runtime.active.clone();
                 let mut context = summarize_context;
                 let participants = summarize_participants;
                 let mut ledger = TranscriptLedger::new();
                 let mut meeting_notes = MeetingNotes::default();
                 let mut last_summary_at = Instant::now() - SUMMARIZE_INTERVAL;
                 let mut last_summarized_id: u64 = 0;
-                let mut force_summary = false;
 
                 let send_status = |mode: String, provider: String| {
                     let _ = ui_tx_summarize.send(UiEvent::SummarizeStatus { mode, provider });
@@ -435,39 +426,11 @@ fn main() {
                 loop {
                     while let Ok(cmd) = summarize_cmd_rx.try_recv() {
                         match cmd {
-                            SummarizeCommand::ToggleMode => {
-                                let next_mode = if current_mode == "cloud" {
-                                    "local"
-                                } else {
-                                    "cloud"
-                                };
-                                match create_summarize_for_mode(
-                                    &summarize_profiles_runtime,
-                                    next_mode,
-                                ) {
-                                    Ok(provider) => {
-                                        summarize = Some(provider);
-                                        current_mode = next_mode.to_string();
-                                        summarize_profiles_runtime.active = current_mode.clone();
-                                        let profile = summarize_profiles_runtime.active_profile();
-                                        send_status(current_mode.clone(), profile.provider.clone());
-                                    }
-                                    Err(e) => {
-                                        eprintln!("summarize switch failed: {e}");
-                                        let profile = summarize_profiles_runtime.active_profile();
-                                        send_status(current_mode.clone(), profile.provider.clone());
-                                    }
-                                }
-                            }
-                            SummarizeCommand::Force => {
-                                force_summary = true;
-                            }
                             SummarizeCommand::Reset => {
                                 ledger = TranscriptLedger::new();
                                 meeting_notes = MeetingNotes::default();
                                 last_summarized_id = 0;
                                 last_summary_at = Instant::now() - SUMMARIZE_INTERVAL;
-                                force_summary = false;
                             }
                             SummarizeCommand::UpdateContext(value) => {
                                 context = value;
@@ -491,21 +454,14 @@ fn main() {
                         .collect();
                     let due = Instant::now().duration_since(last_summary_at) >= SUMMARIZE_INTERVAL;
 
-                    if !(force_summary || (!new_segments.is_empty() && due)) {
+                    if new_segments.is_empty() || !due {
                         continue;
                     }
 
                     let Some(provider) = summarize.as_mut() else {
-                        force_summary = false;
                         last_summary_at = Instant::now();
                         continue;
                     };
-
-                    if new_segments.is_empty() {
-                        force_summary = false;
-                        last_summary_at = Instant::now();
-                        continue;
-                    }
 
                     let mut patch_ready: Option<NotesPatch> = None;
                     let context_ref = if context.trim().is_empty() {
@@ -543,7 +499,6 @@ fn main() {
                             last_summary_at = Instant::now();
                         }
                     }
-                    force_summary = false;
                 }
             }) {
             Ok(handle) => Some(handle),
@@ -557,8 +512,7 @@ fn main() {
         match thread::Builder::new()
             .name("koe-transcribe".into())
             .spawn(move || {
-                let mut current_mode = transcribe_profiles_runtime.active.clone();
-                let models_dir = models_dir.clone();
+                let current_mode = transcribe_profiles_runtime.active.clone();
 
                 let send_status = |mode: String, provider: String, connected: bool| {
                     let _ = ui_tx_transcribe.send(UiEvent::TranscribeStatus {
@@ -576,58 +530,6 @@ fn main() {
                 loop {
                     while let Ok(cmd) = transcribe_cmd_rx.try_recv() {
                         match cmd {
-                            TranscribeCommand::ToggleMode => {
-                                let next_mode = if current_mode == "cloud" {
-                                    "local"
-                                } else {
-                                    "cloud"
-                                };
-                                let next_profile =
-                                    transcribe_profiles_runtime.profile_for_mode_mut(next_mode);
-                                if next_profile.provider == "whisper"
-                                    && let Err(e) =
-                                        ensure_whisper_model(&mut next_profile.model, &models_dir)
-                                {
-                                    eprintln!("init failed: {e}");
-                                    let current_profile =
-                                        transcribe_profiles_runtime.profile_for_mode(&current_mode);
-                                    send_status(
-                                        current_mode.clone(),
-                                        current_profile.provider.clone(),
-                                        false,
-                                    );
-                                    continue;
-                                }
-
-                                match create_transcribe_provider(
-                                    next_profile.provider.as_str(),
-                                    Some(next_profile.model.as_str()),
-                                    non_empty_str(next_profile.api_key.as_str()),
-                                ) {
-                                    Ok(provider) => {
-                                        transcribe = provider;
-                                        current_mode = next_mode.to_string();
-                                        transcribe_profiles_runtime.active = current_mode.clone();
-                                        let active_profile =
-                                            transcribe_profiles_runtime.active_profile();
-                                        send_status(
-                                            current_mode.clone(),
-                                            active_profile.provider.clone(),
-                                            true,
-                                        );
-                                    }
-                                    Err(e) => {
-                                        eprintln!("transcribe switch failed: {e}");
-                                        let current_profile = transcribe_profiles_runtime
-                                            .profile_for_mode(&current_mode);
-                                        send_status(
-                                            current_mode.clone(),
-                                            current_profile.provider.clone(),
-                                            false,
-                                        );
-                                    }
-                                }
-                            }
                             TranscribeCommand::Drain(ack) => {
                                 drain_ack = Some(ack);
                             }

@@ -24,14 +24,11 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub enum TranscribeCommand {
-    ToggleMode,
     Drain(Sender<()>),
 }
 
 #[derive(Debug, Clone)]
 pub enum SummarizeCommand {
-    ToggleMode,
-    Force,
     Reset,
     UpdateContext(String),
 }
@@ -69,15 +66,6 @@ pub struct ModeProfiles {
 impl ModeProfiles {
     fn active_profile(&self) -> &ProfileSummary {
         self.profile_for_mode(self.active.as_str())
-    }
-
-    fn active_profile_mut(&mut self) -> &mut ProfileSummary {
-        let is_cloud = self.active == "cloud";
-        if is_cloud {
-            &mut self.cloud
-        } else {
-            &mut self.local
-        }
     }
 
     fn profile_for_mode(&self, mode: &str) -> &ProfileSummary {
@@ -168,38 +156,16 @@ impl PaletteState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TextInputKind {
-    Context,
-    TranscribeModel,
-    SummarizeModel,
-}
-
-#[derive(Debug, Clone)]
-struct TextInputState {
-    kind: TextInputKind,
-    buffer: String,
-}
-
 #[derive(Debug, Clone)]
 enum UiMode {
     Normal,
     Palette(PaletteState),
-    TextInput(TextInputState),
 }
 
 #[derive(Debug, Clone, Copy)]
 enum PaletteCommandId {
     StartMeeting,
     EndMeeting,
-    PauseCapture,
-    ResumeCapture,
-    ForceSummarize,
-    SwitchTranscribeMode,
-    SwitchSummarizeMode,
-    SetTranscribeModel,
-    SetSummarizeModel,
-    EditContext,
     BrowseSessions,
     CopyTranscriptPath,
     CopyNotesPath,
@@ -306,7 +272,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
     let mut meeting_started_at: Option<Instant> = None;
     let mut meeting_elapsed = Duration::ZERO;
     let mut capture_paused = true;
-    let mut context = ctx.initial_context.clone();
+    let context = ctx.initial_context.clone();
     let mut transcribe_profiles = ctx.transcribe_profiles.clone();
     let mut summarize_profiles = ctx.summarize_profiles.clone();
     let mut session: Option<SessionHandle> = None;
@@ -384,10 +350,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
 
             match &mode {
                 UiMode::Palette(state) => {
-                    render_palette(frame, state, &theme, phase, capture_paused);
-                }
-                UiMode::TextInput(input) => {
-                    render_text_input(frame, input, &theme);
+                    render_palette(frame, state, &theme, phase);
                 }
                 UiMode::Normal => {}
             }
@@ -433,7 +396,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                         state.selected = 0;
                     }
                     if key.code == KeyCode::Enter {
-                        let commands = filtered_commands(phase, capture_paused, &state.filter);
+                        let commands = filtered_commands(phase, &state.filter);
                         if let Some(command) = commands.get(state.selected) {
                             match command.id {
                                 PaletteCommandId::StartMeeting => {
@@ -507,46 +470,6 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     capture_paused = true;
                                     phase = MeetingPhase::PostMeeting;
-                                }
-                                PaletteCommandId::PauseCapture => {
-                                    processor.pause();
-                                    capture_paused = true;
-                                }
-                                PaletteCommandId::ResumeCapture => {
-                                    processor.resume();
-                                    capture_paused = false;
-                                }
-                                PaletteCommandId::ForceSummarize => {
-                                    let _ = ctx.summarize_cmd_tx.send(SummarizeCommand::Force);
-                                }
-                                PaletteCommandId::SwitchTranscribeMode => {
-                                    let _ =
-                                        ctx.transcribe_cmd_tx.send(TranscribeCommand::ToggleMode);
-                                }
-                                PaletteCommandId::SwitchSummarizeMode => {
-                                    let _ = ctx.summarize_cmd_tx.send(SummarizeCommand::ToggleMode);
-                                }
-                                PaletteCommandId::SetTranscribeModel => {
-                                    let buffer = transcribe_profiles.active_profile().model.clone();
-                                    mode = UiMode::TextInput(TextInputState {
-                                        kind: TextInputKind::TranscribeModel,
-                                        buffer,
-                                    });
-                                    continue;
-                                }
-                                PaletteCommandId::SetSummarizeModel => {
-                                    mode = UiMode::TextInput(TextInputState {
-                                        kind: TextInputKind::SummarizeModel,
-                                        buffer: summarize_profiles.active_profile().model.clone(),
-                                    });
-                                    continue;
-                                }
-                                PaletteCommandId::EditContext => {
-                                    mode = UiMode::TextInput(TextInputState {
-                                        kind: TextInputKind::Context,
-                                        buffer: context.clone(),
-                                    });
-                                    continue;
                                 }
                                 PaletteCommandId::BrowseSessions => {
                                     if let Err(err) = open_path(ctx.session_factory.sessions_dir())
@@ -686,108 +609,6 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         mode = UiMode::Normal;
-                    }
-                }
-                UiMode::TextInput(input) => {
-                    if key.code == KeyCode::Esc {
-                        mode = UiMode::Normal;
-                        continue;
-                    }
-                    if key.code == KeyCode::Char('s')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
-                        match input.kind {
-                            TextInputKind::Context => {
-                                context = input.buffer.clone();
-                                if let Some(active_session) = session.as_mut()
-                                    && let Err(err) =
-                                        active_session.update_context(input.buffer.clone())
-                                {
-                                    eprintln!("context update failed: {err}");
-                                }
-                                let _ = ctx
-                                    .summarize_cmd_tx
-                                    .send(SummarizeCommand::UpdateContext(context.clone()));
-                            }
-                            TextInputKind::TranscribeModel => {
-                                transcribe_profiles.active_profile_mut().model =
-                                    input.buffer.trim().to_string();
-                                if let Some(active_session) = session.as_mut() {
-                                    let profile = transcribe_profiles.active_profile();
-                                    if let Err(err) = active_session.update_transcribe(
-                                        profile.provider.clone(),
-                                        profile.model.clone(),
-                                    ) {
-                                        eprintln!("session transcribe update failed: {err}");
-                                    }
-                                }
-                            }
-                            TextInputKind::SummarizeModel => {
-                                summarize_profiles.active_profile_mut().model =
-                                    input.buffer.trim().to_string();
-                                if let Some(active_session) = session.as_mut() {
-                                    let profile = summarize_profiles.active_profile();
-                                    if let Err(err) = active_session.update_summarize(
-                                        profile.provider.clone(),
-                                        profile.model.clone(),
-                                    ) {
-                                        eprintln!("session summarize update failed: {err}");
-                                    }
-                                }
-                            }
-                        }
-                        mode = UiMode::Normal;
-                        continue;
-                    }
-                    if key.code == KeyCode::Backspace {
-                        input.buffer.pop();
-                        continue;
-                    }
-                    if key.code == KeyCode::Enter {
-                        match input.kind {
-                            TextInputKind::Context => input.buffer.push('\n'),
-                            TextInputKind::TranscribeModel | TextInputKind::SummarizeModel => {
-                                let buffer = input.buffer.clone();
-                                match input.kind {
-                                    TextInputKind::TranscribeModel => {
-                                        transcribe_profiles.active_profile_mut().model =
-                                            buffer.trim().to_string();
-                                        if let Some(active_session) = session.as_mut() {
-                                            let profile = transcribe_profiles.active_profile();
-                                            if let Err(err) = active_session.update_transcribe(
-                                                profile.provider.clone(),
-                                                profile.model.clone(),
-                                            ) {
-                                                eprintln!(
-                                                    "session transcribe update failed: {err}"
-                                                );
-                                            }
-                                        }
-                                    }
-                                    TextInputKind::SummarizeModel => {
-                                        summarize_profiles.active_profile_mut().model =
-                                            buffer.trim().to_string();
-                                        if let Some(active_session) = session.as_mut() {
-                                            let profile = summarize_profiles.active_profile();
-                                            if let Err(err) = active_session.update_summarize(
-                                                profile.provider.clone(),
-                                                profile.model.clone(),
-                                            ) {
-                                                eprintln!("session summarize update failed: {err}");
-                                            }
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                                mode = UiMode::Normal;
-                            }
-                        }
-                        continue;
-                    }
-                    if let KeyCode::Char(ch) = key.code
-                        && !key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
-                        input.buffer.push(ch);
                     }
                 }
             }
@@ -1080,7 +901,6 @@ fn render_palette(
     state: &PaletteState,
     theme: &UiTheme,
     phase: MeetingPhase,
-    capture_paused: bool,
 ) {
     let width = 60.min(frame.area().width.saturating_sub(4) as usize) as u16;
     let height = 2 + 1 + 12;
@@ -1112,7 +932,7 @@ fn render_palette(
     let input_line = format!("> {}", state.filter);
     frame.render_widget(Paragraph::new(input_line), input_area);
 
-    let commands = filtered_commands(phase, capture_paused, &state.filter);
+    let commands = filtered_commands(phase, &state.filter);
     let selected = if commands.is_empty() {
         0
     } else {
@@ -1164,37 +984,6 @@ fn render_command_lines(
         lines.push(Line::from(spans));
     }
     lines
-}
-
-fn render_text_input(frame: &mut ratatui::Frame, input: &TextInputState, theme: &UiTheme) {
-    let width = 70.min(frame.area().width.saturating_sub(4) as usize) as u16;
-    let height = 10.min(frame.area().height.saturating_sub(4) as usize) as u16;
-    let area = centered_rect(width, height, frame.area());
-    frame.render_widget(Clear, area);
-
-    let title = match input.kind {
-        TextInputKind::Context => "Context (Ctrl+S save, Esc cancel)",
-        TextInputKind::TranscribeModel => "Transcribe model (Enter save, Esc cancel)",
-        TextInputKind::SummarizeModel => "Summarize Model (Enter save, Esc cancel)",
-    };
-
-    let body = if input.buffer.is_empty() {
-        Text::from(Line::from(Span::styled(
-            "type...",
-            Style::default().fg(theme.muted),
-        )))
-    } else {
-        Text::from(input.buffer.clone())
-    };
-
-    let editor = Paragraph::new(body)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(title, Style::default().fg(theme.heading))),
-        )
-        .wrap(Wrap { trim: false });
-    frame.render_widget(editor, area);
 }
 
 fn render_scrolled_paragraph(frame: &mut ratatui::Frame, area: Rect, lines: &[Line<'static>]) {
@@ -1274,12 +1063,8 @@ fn render_notes_lines(notes: &MeetingNotes, theme: &UiTheme) -> Vec<Line<'static
     lines
 }
 
-fn filtered_commands(
-    phase: MeetingPhase,
-    capture_paused: bool,
-    filter: &str,
-) -> Vec<PaletteCommand> {
-    let commands = commands_for_phase(phase, capture_paused);
+fn filtered_commands(phase: MeetingPhase, filter: &str) -> Vec<PaletteCommand> {
+    let commands = commands_for_phase(phase);
     if filter.trim().is_empty() {
         return commands;
     }
@@ -1289,7 +1074,7 @@ fn filtered_commands(
         .collect()
 }
 
-fn commands_for_phase(phase: MeetingPhase, capture_paused: bool) -> Vec<PaletteCommand> {
+fn commands_for_phase(phase: MeetingPhase) -> Vec<PaletteCommand> {
     match phase {
         MeetingPhase::Idle => vec![
             PaletteCommand {
@@ -1298,85 +1083,38 @@ fn commands_for_phase(phase: MeetingPhase, capture_paused: bool) -> Vec<PaletteC
                 category: "meeting",
             },
             PaletteCommand {
-                id: PaletteCommandId::SwitchTranscribeMode,
-                label: "switch transcribe mode",
-                category: "setting",
-            },
-            PaletteCommand {
-                id: PaletteCommandId::SwitchSummarizeMode,
-                label: "switch summarize mode",
-                category: "setting",
-            },
-            PaletteCommand {
-                id: PaletteCommandId::SetTranscribeModel,
-                label: "set transcribe model",
-                category: "setting",
-            },
-            PaletteCommand {
-                id: PaletteCommandId::SetSummarizeModel,
-                label: "set summarize model",
-                category: "setting",
-            },
-            PaletteCommand {
-                id: PaletteCommandId::EditContext,
-                label: "edit context",
-                category: "setting",
-            },
-            PaletteCommand {
                 id: PaletteCommandId::BrowseSessions,
                 label: "browse sessions",
                 category: "view",
             },
         ],
-        MeetingPhase::MeetingActive => {
-            let mut commands = vec![
-                PaletteCommand {
-                    id: PaletteCommandId::EndMeeting,
-                    label: "end meeting",
-                    category: "meeting",
-                },
-                PaletteCommand {
-                    id: PaletteCommandId::ForceSummarize,
-                    label: "force summarize",
-                    category: "meeting",
-                },
-                PaletteCommand {
-                    id: PaletteCommandId::SwitchTranscribeMode,
-                    label: "switch transcribe mode",
-                    category: "setting",
-                },
-                PaletteCommand {
-                    id: PaletteCommandId::SwitchSummarizeMode,
-                    label: "switch summarize mode",
-                    category: "setting",
-                },
-                PaletteCommand {
-                    id: PaletteCommandId::EditContext,
-                    label: "edit context",
-                    category: "setting",
-                },
-            ];
-            if capture_paused {
-                commands.insert(
-                    1,
-                    PaletteCommand {
-                        id: PaletteCommandId::ResumeCapture,
-                        label: "resume capture",
-                        category: "meeting",
-                    },
-                );
-            } else {
-                commands.insert(
-                    1,
-                    PaletteCommand {
-                        id: PaletteCommandId::PauseCapture,
-                        label: "pause capture",
-                        category: "meeting",
-                    },
-                );
-            }
-            commands
-        }
+        MeetingPhase::MeetingActive => vec![
+            PaletteCommand {
+                id: PaletteCommandId::EndMeeting,
+                label: "end meeting",
+                category: "meeting",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::CopyTranscriptPath,
+                label: "copy transcript path",
+                category: "export",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::CopyNotesPath,
+                label: "copy notes path",
+                category: "export",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::CopyAudioPath,
+                label: "copy audio path",
+                category: "export",
+            },
+            PaletteCommand {
+                id: PaletteCommandId::OpenSessionFolder,
+                label: "open session folder",
+                category: "export",
+            },
+        ],
         MeetingPhase::PostMeeting => vec![
             PaletteCommand {
                 id: PaletteCommandId::CopyTranscriptPath,

@@ -349,3 +349,17 @@ Phase 7: Audio quality improvements
     - [x] Audio waveform animates during capture, goes flat when stopped.
     - [ ] All actions (switch provider, edit context, end meeting, copy exports) accessible and functional through palette only.
         - BLOCKED: Requires manual palette interaction and system integrations (clipboard/open); cannot exercise in non-interactive session; tried only code-level wiring; next steps: run `bun run koe`, open palette and execute each command, confirm expected behavior; file refs: `crates/koe-cli/src/tui.rs`.
+
+Phase 8: Post-cleanup stability pass
+
+- Done criteria:
+    - [x] Command palette only supports meeting/session actions; remove config-related commands and handlers (no transcribe/summarize mode/model switches in TUI).
+    - [ ] Paused capture still applies transcript/notes events to UI and session persistence; pause only stops new capture input.
+    - [ ] CMSampleBuffer audio data alignment validated before unsafe cast; fallback path for unaligned buffers.
+    - [ ] Summarize prompt includes existing notes/IDs to prevent duplicates; add tests for idempotency.
+    - [ ] Export path resilient to long sessions; timeout behavior adjusted or async export status added.
+- Smoke tests:
+    - [ ] Palette lists only start/end/new meeting, export, and session browse/open/copy actions.
+    - [ ] Pausing capture during active meeting does not drop transcript/notes updates.
+    - [ ] Summarize runs multiple cycles without new transcript and produces no duplicate notes.
+    - [ ] Export completes or reports async/pending for long sessions without blocking UI shutdown.
