@@ -1,4 +1,5 @@
 pub mod cloud;
+pub mod filter;
 pub mod local;
 mod patch;
 

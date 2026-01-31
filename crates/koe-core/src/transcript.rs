@@ -81,6 +81,11 @@ impl TranscriptLedger {
         &self.segments
     }
 
+    /// Latest end timestamp across all segments.
+    pub fn highest_end_ms(&self) -> i64 {
+        self.highest_end_ms
+    }
+
     /// Incremental read: segments with `id > since_id`.
     pub fn segments_since(&self, since_id: u64) -> &[TranscriptSegment] {
         match self.segments.iter().position(|s| s.id > since_id) {

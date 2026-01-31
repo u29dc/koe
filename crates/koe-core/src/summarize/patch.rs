@@ -8,9 +8,16 @@ pub(crate) fn build_prompt(
     context: Option<&str>,
     participants: &[String],
 ) -> String {
+    const JSON_SCHEMA_SAMPLE: &str = r#"
+{
+    "ops": [
+        {"op": "add", "id": "n_1", "text": "...", "evidence": [1,2]}
+    ]
+}
+"#;
+    const EMPTY_OPS: &str = r#"{"ops": []}"#;
     let transcript = recent
         .iter()
-        .filter(|s| s.finalized)
         .map(|s| {
             let text = s.text.trim();
             match s.speaker.as_deref() {
@@ -49,7 +56,96 @@ pub(crate) fn build_prompt(
     };
 
     format!(
-        "You are a concise meeting note-taker. Return ONLY valid JSON with this schema:\n{{\n  \"ops\": [\n    {{\"op\": \"add\", \"id\": \"n_1\", \"text\": \"...\", \"evidence\": [1,2]}}\n  ]\n}}\n\nRules:\n- append-only: only \"add\" ops, no updates or deletes\n- output a rolling list of bullet points, no sections or categories\n- distill 30-60 seconds of conversation into a single statement when possible\n- focus on decisions, commitments, deadlines, and key facts; skip filler or chatter\n- avoid repeating information already captured\n- each text is <= 120 characters and <= 1 sentence\n- return at most 3 ops per response\n- if no meaningful updates, return {{\"ops\": []}}\n- if a transcript line includes a speaker label, preserve it in note text as \"Me:\" or \"Them:\"\n- ids must be unique; use the \"n_\" prefix (examples: n_1, n_2)\n\n{context_block}{participants_block}{notes_block}Transcript (new since last summary):\n{transcript}\n"
+        r#"
+<task>
+You are processing a live meeting transcript in 4-second increments. Your job: capture anything that might be worth remembering. Err on the side of inclusion -- it's easy to ignore a low-value note later, but impossible to recover a missed one.
+</task>
+
+<schema>
+Output JSON matching this schema:
+{schema}
+</schema>
+
+<rules>
+Only return {empty_ops} if the transcript is truly empty content: pure filler, greetings with no substance, or silence.
+</rules>
+
+---
+
+<capture>
+WHAT TO CAPTURE:
+
+Tier 1 - Always capture:
+- Decisions: anything agreed, chosen, rejected, or finalized
+- Action items: who will do what (deadline optional but include if mentioned)
+- Commitments: promises, offers, acceptances
+- Deadlines or dates mentioned
+- Names, titles, or contacts introduced
+
+Tier 2 - Capture liberally:
+- Key facts, numbers, metrics, technical details
+- Opinions or positions stated clearly ("I think we should...", "My concern is...")
+- Questions raised (even if not yet answered)
+- Problems or blockers identified
+- Topics flagged for follow-up ("we should discuss X later")
+- Context that explains why something matters
+
+Capture liberally, but only if it adds new facts. If it rephrases an existing note, skip it.
+</capture>
+
+---
+
+<skip>
+WHAT TO SKIP:
+
+- Pure filler and backchannels: "yeah", "um", "so", "right", "okay", "thanks", "got it"
+- Greetings and small talk with zero content
+- Paraphrases of existing notes (check the list; new facts only)
+- Sentence fragments that are clearly incomplete mid-thought
+- Single-word utterances unless they are a name, number, or date
+
+That's it. Everything else is fair game.
+</skip>
+
+---
+
+<format>
+FORMAT RULES:
+
+- Max 3 ops per response; 0-2 is normal
+- Each bullet: 1 sentence, <=120 characters
+- Prefer concrete and specific over vague ("ship Friday" not "ship soon")
+- If transcript shows a speaker label, include it: "Sarah: PR is ready for review"
+- ID format: "n_<number>" -- must not collide with existing note IDs
+- Evidence field: list start_ms values from supporting transcript segments
+</format>
+
+---
+
+<input>
+<input_context>
+{context_block}
+</input_context>
+
+<input_participants>
+{participants_block}
+</input_participants>
+
+<input_notes>
+{notes_block}
+</input_notes>
+
+<input_transcript>
+{transcript}
+</input_transcript>
+</input>
+"#,
+        schema = JSON_SCHEMA_SAMPLE,
+        empty_ops = EMPTY_OPS,
+        context_block = context_block,
+        participants_block = participants_block,
+        notes_block = notes_block,
+        transcript = transcript
     )
 }
 
@@ -153,7 +249,7 @@ mod tests {
     #[test]
     fn build_prompt_includes_transcript() {
         let prompt = build_prompt(&[seg(1, "hello")], &MeetingNotes::default(), None, &[]);
-        assert!(prompt.contains("Transcript (new since last summary):"));
+        assert!(prompt.contains("<input_transcript>"));
     }
 
     #[test]
@@ -169,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn build_prompt_uses_finalized_only() {
+    fn build_prompt_includes_unfinalized() {
         let prompt = build_prompt(
             &[seg(1, "keep"), seg_unfinalized(2, "drop")],
             &MeetingNotes::default(),
@@ -177,15 +273,15 @@ mod tests {
             &[],
         );
         assert!(prompt.contains("keep"));
-        assert!(!prompt.contains("drop"));
+        assert!(prompt.contains("drop"));
     }
 
     #[test]
     fn build_prompt_is_information_dense() {
         let prompt = build_prompt(&[seg(1, "alpha")], &MeetingNotes::default(), None, &[]);
-        assert!(prompt.contains("rolling list"));
-        assert!(prompt.contains("<= 120"));
-        assert!(prompt.contains("at most 3 ops"));
+        assert!(prompt.contains("WHAT TO CAPTURE"));
+        assert!(prompt.contains("<=120"));
+        assert!(prompt.contains("Max 3 ops per response"));
     }
 
     #[test]
