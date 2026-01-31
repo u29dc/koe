@@ -385,6 +385,7 @@ fn main() {
     let (summarize_cmd_tx, summarize_cmd_rx) = mpsc::channel();
     let (summarize_tx_transcribe, summarize_rx) = mpsc::sync_channel(1);
     let ui_tx_summarize = ui_tx.clone();
+    let ui_tx_summarize_error = ui_tx.clone();
     let ui_tx_transcribe = ui_tx.clone();
     let transcribe_profiles_runtime = run.transcribe_profiles.clone();
     let summarize_profiles_runtime = run.summarize_profiles.clone();
@@ -422,7 +423,9 @@ fn main() {
                             Some(provider)
                         }
                         Err(e) => {
-                            eprintln!("summarize init failed: {e}");
+                            let _ = ui_tx_summarize.send(UiEvent::Error {
+                                message: format!("summarize init failed: {e}"),
+                            });
                             let profile = summarize_profiles_runtime.active_profile();
                             send_status(current_mode.clone(), profile.provider.clone());
                             None
@@ -537,7 +540,9 @@ fn main() {
                             last_summarized_id = max_new_id;
                         }
                         Err(e) => {
-                            eprintln!("summarize error: {e}");
+                            let _ = ui_tx_summarize.send(UiEvent::Error {
+                                message: format!("summarize error: {e}"),
+                            });
                             last_summary_at = Instant::now();
                         }
                     }
@@ -545,7 +550,9 @@ fn main() {
             }) {
             Ok(handle) => Some(handle),
             Err(e) => {
-                eprintln!("summarize thread spawn failed: {e}");
+                let _ = ui_tx_summarize_error.send(UiEvent::Error {
+                    message: format!("summarize thread spawn failed: {e}"),
+                });
                 None
             }
         };
@@ -598,7 +605,9 @@ fn main() {
                         match transcribe_with_latency(transcribe.as_mut(), &chunk) {
                             Ok(result) => result,
                             Err(e) => {
-                                eprintln!("transcribe error: {e}");
+                                let _ = ui_tx_transcribe.send(UiEvent::Error {
+                                    message: format!("transcribe error: {e}"),
+                                });
                                 continue;
                             }
                         };
@@ -807,7 +816,8 @@ fn apply_notes_patch_state(notes: &mut MeetingNotes, patch: NotesPatch) -> bool 
     for op in patch.ops {
         match op {
             NotesOp::Add { id, text, evidence } => {
-                let normalized_text = normalize_text(&text);
+                let cleaned_text = strip_note_prefixes(&text);
+                let normalized_text = normalize_text(&cleaned_text);
                 if normalized_text.is_empty()
                     || existing_ids.contains(&id)
                     || existing_normalized.contains(&normalized_text)
@@ -818,7 +828,7 @@ fn apply_notes_patch_state(notes: &mut MeetingNotes, patch: NotesPatch) -> bool 
                 }
                 notes.bullets.push(NoteBullet {
                     id: id.clone(),
-                    text,
+                    text: cleaned_text,
                     evidence,
                 });
                 existing_ids.insert(id);
@@ -876,6 +886,17 @@ fn is_stopword(token: &str) -> bool {
     ];
 
     STOPWORDS.contains(&token)
+}
+
+fn strip_note_prefixes(text: &str) -> String {
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("Me:") {
+        return rest.trim_start().to_string();
+    }
+    if let Some(rest) = trimmed.strip_prefix("Them:") {
+        return rest.trim_start().to_string();
+    }
+    trimmed.to_string()
 }
 
 #[cfg(test)]

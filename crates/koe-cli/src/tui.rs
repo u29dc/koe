@@ -36,6 +36,9 @@ pub enum SummarizeCommand {
 pub enum UiEvent {
     Transcript(Vec<TranscriptSegment>),
     NotesPatch(NotesPatch),
+    Error {
+        message: String,
+    },
     TranscribeStatus {
         mode: String,
         provider: String,
@@ -121,6 +124,7 @@ struct UiTheme {
     heading: Color,
     muted: Color,
     neutral: Color,
+    error: Color,
 }
 
 impl UiTheme {
@@ -136,7 +140,8 @@ impl UiTheme {
             them: Color::Rgb(150, 150, 150),
             heading: Color::Rgb(140, 140, 140),
             muted: Color::Rgb(110, 110, 110),
-            neutral: Color::Rgb(210, 210, 210),
+            neutral: Color::Rgb(90, 90, 90),
+            error: Color::Rgb(200, 80, 80),
         }
     }
 }
@@ -227,6 +232,8 @@ struct FooterState<'a> {
     waveform: &'a Waveform,
     transcribe_mode: &'a str,
     transcribe_provider: &'a str,
+    summarize_mode: &'a str,
+    summarize_provider: &'a str,
     transcribe_connected: bool,
     transcribe_lag_ms: Option<u128>,
     stats: &'a CaptureStats,
@@ -234,6 +241,15 @@ struct FooterState<'a> {
 }
 
 struct TerminalGuard;
+
+#[derive(Debug, Clone)]
+struct UiError {
+    message: String,
+}
+
+fn set_error(error_state: &mut Option<UiError>, message: String) {
+    *error_state = Some(UiError { message });
+}
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
@@ -267,6 +283,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
     let mut notes_lines = render_notes_lines(&meeting_notes, &theme);
     let mut transcribe_connected = true;
     let mut transcribe_lag_ms: Option<u128> = None;
+    let mut error_state: Option<UiError> = None;
     let mut phase = MeetingPhase::Idle;
     let mut mode = UiMode::Normal;
     let mut meeting_started_at: Option<Instant> = None;
@@ -293,6 +310,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
             summarize_profiles: &mut summarize_profiles,
             transcribe_connected: &mut transcribe_connected,
             transcribe_lag_ms: &mut transcribe_lag_ms,
+            error_state: &mut error_state,
             theme: &theme,
         };
         drain_ui_events(&ctx.ui_rx, &mut event_state);
@@ -308,9 +326,10 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         terminal.draw(|frame| {
-            let [title_area, content_area, footer_area] = Layout::vertical([
+            let [title_area, content_area, error_area, footer_area] = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Min(1),
+                Constraint::Length(1),
                 Constraint::Length(1),
             ])
             .areas(frame.area());
@@ -340,11 +359,14 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                 waveform: &waveform,
                 transcribe_mode: transcribe_profiles.active.as_str(),
                 transcribe_provider: transcribe_profiles.active_profile().provider.as_str(),
+                summarize_mode: summarize_profiles.active.as_str(),
+                summarize_provider: summarize_profiles.active_profile().provider.as_str(),
                 transcribe_connected,
                 transcribe_lag_ms,
                 stats: &ctx.stats,
                 ledger: &ledger,
             };
+            render_error_line(frame, error_area, &theme, error_state.as_ref());
             render_footer(frame, footer_area, &theme, footer_state);
 
             match &mode {
@@ -440,6 +462,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                         summarize_profiles: &mut summarize_profiles,
                                         transcribe_connected: &mut transcribe_connected,
                                         transcribe_lag_ms: &mut transcribe_lag_ms,
+                                        error_state: &mut error_state,
                                         theme: &theme,
                                     };
                                     let drained = drain_transcribe_with_timeout(
@@ -449,20 +472,40 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                         Duration::from_secs(2),
                                     );
                                     if !drained {
-                                        eprintln!("transcribe drain timed out");
+                                        set_error(
+                                            &mut error_state,
+                                            "transcribe drain timed out".to_string(),
+                                        );
                                     }
                                     ctx.shared_writer.set(None);
                                     if let Some(active_session) = session.as_mut() {
                                         let segments = ledger.segments().to_vec();
                                         let state_snapshot = meeting_notes.clone();
-                                        if let Err(err) = export_session_with_timeout(
+                                        match export_session_with_timeout(
                                             active_session.clone(),
                                             segments,
                                             state_snapshot,
                                         ) {
-                                            eprintln!("export failed: {err}");
-                                        } else if let Err(err) = active_session.finalize() {
-                                            eprintln!("session finalize failed: {err}");
+                                            Ok(ExportOutcome::Completed) => {}
+                                            Ok(ExportOutcome::Pending) => {
+                                                set_error(
+                                                    &mut error_state,
+                                                    "export still running; continuing in background"
+                                                        .to_string(),
+                                                );
+                                            }
+                                            Err(err) => {
+                                                set_error(
+                                                    &mut error_state,
+                                                    format!("export failed: {err}"),
+                                                );
+                                            }
+                                        }
+                                        if let Err(err) = active_session.finalize() {
+                                            set_error(
+                                                &mut error_state,
+                                                format!("session finalize failed: {err}"),
+                                            );
                                         }
                                         session_finalized = true;
                                     }
@@ -472,7 +515,10 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                 PaletteCommandId::BrowseSessions => {
                                     if let Err(err) = open_path(ctx.session_factory.sessions_dir())
                                     {
-                                        eprintln!("open sessions failed: {err}");
+                                        set_error(
+                                            &mut error_state,
+                                            format!("open sessions failed: {err}"),
+                                        );
                                     }
                                 }
                                 PaletteCommandId::CopyTranscriptPath => {
@@ -480,7 +526,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                         && let Ok(path) = active_session.export_transcript_path()
                                         && let Err(err) = copy_to_clipboard(&path)
                                     {
-                                        eprintln!("copy failed: {err}");
+                                        set_error(&mut error_state, format!("copy failed: {err}"));
                                     }
                                 }
                                 PaletteCommandId::CopyNotesPath => {
@@ -488,7 +534,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                         && let Ok(path) = active_session.export_notes_path()
                                         && let Err(err) = copy_to_clipboard(&path)
                                     {
-                                        eprintln!("copy failed: {err}");
+                                        set_error(&mut error_state, format!("copy failed: {err}"));
                                     }
                                 }
                                 PaletteCommandId::CopyAudioPath => {
@@ -496,14 +542,17 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                         && let Err(err) =
                                             copy_to_clipboard(&active_session.audio_raw_path())
                                     {
-                                        eprintln!("copy failed: {err}");
+                                        set_error(&mut error_state, format!("copy failed: {err}"));
                                     }
                                 }
                                 PaletteCommandId::OpenSessionFolder => {
                                     if let Some(active_session) = session.as_ref()
                                         && let Err(err) = open_path(active_session.session_dir())
                                     {
-                                        eprintln!("open session failed: {err}");
+                                        set_error(
+                                            &mut error_state,
+                                            format!("open session failed: {err}"),
+                                        );
                                     }
                                 }
                                 PaletteCommandId::ExportMarkdown => {
@@ -511,12 +560,18 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                         if let Err(err) = active_session
                                             .export_transcript_markdown(ledger.segments())
                                         {
-                                            eprintln!("export transcript failed: {err}");
+                                            set_error(
+                                                &mut error_state,
+                                                format!("export transcript failed: {err}"),
+                                            );
                                         }
                                         if let Err(err) =
                                             active_session.export_notes_markdown(&meeting_notes)
                                         {
-                                            eprintln!("export notes failed: {err}");
+                                            set_error(
+                                                &mut error_state,
+                                                format!("export notes failed: {err}"),
+                                            );
                                         }
                                     }
                                 }
@@ -537,6 +592,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                             summarize_profiles: &mut summarize_profiles,
                                             transcribe_connected: &mut transcribe_connected,
                                             transcribe_lag_ms: &mut transcribe_lag_ms,
+                                            error_state: &mut error_state,
                                             theme: &theme,
                                         };
                                         let drained = drain_transcribe_with_timeout(
@@ -546,7 +602,10 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                             Duration::from_secs(2),
                                         );
                                         if !drained {
-                                            eprintln!("transcribe drain timed out");
+                                            set_error(
+                                                &mut error_state,
+                                                "transcribe drain timed out".to_string(),
+                                            );
                                         }
                                     }
                                     ctx.shared_writer.set(None);
@@ -556,11 +615,26 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                                     {
                                         let segments = ledger.segments().to_vec();
                                         let state_snapshot = meeting_notes.clone();
-                                        let _ = export_session_with_timeout(
+                                        match export_session_with_timeout(
                                             active_session.clone(),
                                             segments,
                                             state_snapshot,
-                                        );
+                                        ) {
+                                            Ok(ExportOutcome::Completed) => {}
+                                            Ok(ExportOutcome::Pending) => {
+                                                set_error(
+                                                    &mut error_state,
+                                                    "export still running; continuing in background"
+                                                        .to_string(),
+                                                );
+                                            }
+                                            Err(err) => {
+                                                set_error(
+                                                    &mut error_state,
+                                                    format!("export failed: {err}"),
+                                                );
+                                            }
+                                        }
                                         let _ = active_session.finalize();
                                     }
                                     session = None;
@@ -624,6 +698,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                 summarize_profiles: &mut summarize_profiles,
                 transcribe_connected: &mut transcribe_connected,
                 transcribe_lag_ms: &mut transcribe_lag_ms,
+                error_state: &mut error_state,
                 theme: &theme,
             };
             let drained = drain_transcribe_with_timeout(
@@ -633,7 +708,7 @@ pub fn run(ctx: TuiContext) -> Result<(), Box<dyn std::error::Error>> {
                 Duration::from_secs(2),
             );
             if !drained {
-                eprintln!("transcribe drain timed out");
+                set_error(&mut error_state, "transcribe drain timed out".to_string());
             }
             ctx.shared_writer.set(None);
             break;
@@ -666,10 +741,15 @@ struct UiEventState<'a> {
     summarize_profiles: &'a mut ModeProfiles,
     transcribe_connected: &'a mut bool,
     transcribe_lag_ms: &'a mut Option<u128>,
+    error_state: &'a mut Option<UiError>,
     theme: &'a UiTheme,
 }
 
 impl<'a> UiEventState<'a> {
+    fn push_error(&mut self, message: String) {
+        *self.error_state = Some(UiError { message });
+    }
+
     fn apply_event(&mut self, event: UiEvent) {
         let accept_updates = self.phase == MeetingPhase::MeetingActive;
 
@@ -679,7 +759,7 @@ impl<'a> UiEventState<'a> {
                     if let Some(active_session) = self.session.as_mut()
                         && let Err(err) = active_session.append_transcript(&segments)
                     {
-                        eprintln!("session transcript write failed: {err}");
+                        self.push_error(format!("session transcript write failed: {err}"));
                     }
                     self.ledger.append(segments);
                     *self.transcript_lines = render_transcript_lines(self.ledger, self.theme);
@@ -690,10 +770,13 @@ impl<'a> UiEventState<'a> {
                     if let Some(active_session) = self.session.as_mut()
                         && let Err(err) = active_session.write_notes(self.meeting_notes)
                     {
-                        eprintln!("session notes write failed: {err}");
+                        self.push_error(format!("session notes write failed: {err}"));
                     }
                     *self.notes_lines = render_notes_lines(self.meeting_notes, self.theme);
                 }
+            }
+            UiEvent::Error { message } => {
+                self.push_error(message);
             }
             UiEvent::TranscribeStatus {
                 mode,
@@ -708,7 +791,7 @@ impl<'a> UiEventState<'a> {
                     if let Err(err) = active_session
                         .update_transcribe(profile.provider.clone(), profile.model.clone())
                     {
-                        eprintln!("session transcribe update failed: {err}");
+                        self.push_error(format!("session transcribe update failed: {err}"));
                     }
                 }
             }
@@ -720,7 +803,7 @@ impl<'a> UiEventState<'a> {
                     if let Err(err) = active_session
                         .update_summarize(profile.provider.clone(), profile.model.clone())
                     {
-                        eprintln!("session summarize update failed: {err}");
+                        self.push_error(format!("session summarize update failed: {err}"));
                     }
                 }
             }
@@ -855,13 +938,13 @@ fn render_footer(frame: &mut ratatui::Frame, area: Rect, theme: &UiTheme, state:
         .map(|ms| format!("{:.1}", ms as f64 / 1000.0))
         .unwrap_or_else(|| "n/a".to_string());
     let metrics = format!(
-        "transcribe:{}:{} {transcribe_state} lag:{lag}s chunks:{}/{} frames:{}/{} raw_drop:{} segs:{}",
+        "transcribe:{}:{} | summarize:{}:{} | {transcribe_state} | lag:{lag}s | chunks:{}/{} | raw_drop:{} | segs:{}",
         state.transcribe_mode,
         state.transcribe_provider,
+        state.summarize_mode,
+        state.summarize_provider,
         state.stats.chunks_emitted(),
         state.stats.chunks_dropped(),
-        state.stats.frames_captured(),
-        state.stats.frames_dropped(),
         state.stats.raw_frames_dropped(),
         state.ledger.len(),
     );
@@ -884,6 +967,48 @@ fn render_footer(frame: &mut ratatui::Frame, area: Rect, theme: &UiTheme, state:
             .style(Style::default().fg(theme.muted)),
         right,
     );
+}
+
+fn render_error_line(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    theme: &UiTheme,
+    error_state: Option<&UiError>,
+) {
+    let line = if let Some(error) = error_state {
+        let message = truncate_line(&format!("error: {}", error.message), area.width as usize);
+        Line::from(Span::styled(message, Style::default().fg(theme.error)))
+    } else {
+        Line::from(Span::styled("", Style::default().fg(theme.muted)))
+    };
+
+    frame.render_widget(
+        Paragraph::new(Text::from(line)).wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn truncate_line(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let char_count = text.chars().count();
+    if char_count <= max_width {
+        return text.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+    let cutoff = max_width - 3;
+    let mut truncated = String::with_capacity(max_width);
+    for (index, ch) in text.chars().enumerate() {
+        if index >= cutoff {
+            break;
+        }
+        truncated.push(ch);
+    }
+    truncated.push_str("...");
+    truncated
 }
 
 fn render_palette(
@@ -1217,13 +1342,7 @@ fn export_session_with_timeout(
     match rx.recv_timeout(timeout) {
         Ok(Ok(())) => Ok(ExportOutcome::Completed),
         Ok(Err(err)) => Err(Box::new(err)),
-        Err(RecvTimeoutError::Timeout) => {
-            eprintln!(
-                "export still running after {}s; continuing in background",
-                timeout.as_secs()
-            );
-            Ok(ExportOutcome::Pending)
-        }
+        Err(RecvTimeoutError::Timeout) => Ok(ExportOutcome::Pending),
         Err(RecvTimeoutError::Disconnected) => Err("export thread disconnected".into()),
     }
 }
@@ -1252,27 +1371,6 @@ fn apply_notes_patch(notes: &mut MeetingNotes, patch: NotesPatch) -> bool {
 
 fn note_line(text: String, theme: &UiTheme) -> Line<'static> {
     let bullet = "·";
-    if let Some(rest) = text.strip_prefix("Me:") {
-        return Line::from(vec![
-            Span::styled(format!("{bullet} "), Style::default().fg(theme.neutral)),
-            Span::styled("Me:", Style::default().fg(theme.me)),
-            Span::styled(
-                format!(" {}", rest.trim_start()),
-                Style::default().fg(theme.neutral),
-            ),
-        ]);
-    }
-    if let Some(rest) = text.strip_prefix("Them:") {
-        return Line::from(vec![
-            Span::styled(format!("{bullet} "), Style::default().fg(theme.neutral)),
-            Span::styled("Them:", Style::default().fg(theme.them)),
-            Span::styled(
-                format!(" {}", rest.trim_start()),
-                Style::default().fg(theme.neutral),
-            ),
-        ]);
-    }
-
     Line::from(Span::styled(
         format!("{bullet} {text}"),
         Style::default().fg(theme.neutral),

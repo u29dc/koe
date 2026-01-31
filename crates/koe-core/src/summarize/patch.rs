@@ -115,7 +115,7 @@ FORMAT RULES:
 - Max 3 ops per response; 0-2 is normal
 - Each bullet: 1 sentence, <=120 characters
 - Prefer concrete and specific over vague ("ship Friday" not "ship soon")
-- If transcript shows a speaker label, include it: "Sarah: PR is ready for review"
+- Do not include speaker labels in note text
 - ID format: "n_<number>" -- must not collide with existing note IDs
 - Evidence field: list start_ms values from supporting transcript segments
 </format>
