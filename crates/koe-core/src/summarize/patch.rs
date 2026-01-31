@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 pub(crate) fn build_prompt(
     recent: &[TranscriptSegment],
-    _notes: &MeetingNotes,
+    notes: &MeetingNotes,
     context: Option<&str>,
     participants: &[String],
 ) -> String {
@@ -36,9 +36,20 @@ pub(crate) fn build_prompt(
     } else {
         format!("Participants: {}\n\n", participants_list.join(", "))
     };
+    let notes_block = if notes.bullets.is_empty() {
+        String::new()
+    } else {
+        let lines = notes
+            .bullets
+            .iter()
+            .map(|bullet| format!("- {}: {}", bullet.id, bullet.text.trim()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("Existing notes (avoid duplicates):\n{lines}\n\n")
+    };
 
     format!(
-        "You are a concise meeting note-taker. Return ONLY valid JSON with this schema:\n{{\n  \"ops\": [\n    {{\"op\": \"add\", \"id\": \"n_1\", \"text\": \"...\", \"evidence\": [1,2]}}\n  ]\n}}\n\nRules:\n- append-only: only \"add\" ops, no updates or deletes\n- output a rolling list of bullet points, no sections or categories\n- distill 30-60 seconds of conversation into a single statement when possible\n- focus on decisions, commitments, deadlines, and key facts; skip filler or chatter\n- avoid repeating information already captured\n- each text is <= 120 characters and <= 1 sentence\n- return at most 3 ops per response\n- if no meaningful updates, return {{\"ops\": []}}\n- if a transcript line includes a speaker label, preserve it in note text as \"Me:\" or \"Them:\"\n- ids must be unique; use the \"n_\" prefix (examples: n_1, n_2)\n\n{context_block}{participants_block}Transcript (new since last summary):\n{transcript}\n"
+        "You are a concise meeting note-taker. Return ONLY valid JSON with this schema:\n{{\n  \"ops\": [\n    {{\"op\": \"add\", \"id\": \"n_1\", \"text\": \"...\", \"evidence\": [1,2]}}\n  ]\n}}\n\nRules:\n- append-only: only \"add\" ops, no updates or deletes\n- output a rolling list of bullet points, no sections or categories\n- distill 30-60 seconds of conversation into a single statement when possible\n- focus on decisions, commitments, deadlines, and key facts; skip filler or chatter\n- avoid repeating information already captured\n- each text is <= 120 characters and <= 1 sentence\n- return at most 3 ops per response\n- if no meaningful updates, return {{\"ops\": []}}\n- if a transcript line includes a speaker label, preserve it in note text as \"Me:\" or \"Them:\"\n- ids must be unique; use the \"n_\" prefix (examples: n_1, n_2)\n\n{context_block}{participants_block}{notes_block}Transcript (new since last summary):\n{transcript}\n"
     )
 }
 
@@ -99,7 +110,7 @@ fn extract_json_object(input: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::{build_prompt, extract_json_object, parse_patch};
-    use crate::types::{MeetingNotes, TranscriptSegment};
+    use crate::types::{MeetingNotes, NoteBullet, TranscriptSegment};
 
     fn seg(id: u64, text: &str) -> TranscriptSegment {
         TranscriptSegment {
@@ -195,5 +206,19 @@ mod tests {
             &participants,
         );
         assert!(prompt.contains("Participants: Han, Sarah"));
+    }
+
+    #[test]
+    fn build_prompt_includes_existing_notes() {
+        let mut notes = MeetingNotes::default();
+        notes.bullets.push(NoteBullet {
+            id: "n_1".to_string(),
+            text: "Decision: ship by Friday".to_string(),
+            evidence: vec![1],
+        });
+        let prompt = build_prompt(&[seg(1, "hello")], &notes, None, &[]);
+        assert!(prompt.contains("Existing notes (avoid duplicates):"));
+        assert!(prompt.contains("n_1"));
+        assert!(prompt.contains("Decision: ship by Friday"));
     }
 }
